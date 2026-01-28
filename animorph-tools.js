@@ -1024,12 +1024,6 @@
   function createTextDisplayElement(data = {}) {
     debugLog("[TextDisplay] Creating new text display cube...");
     const targetGroup = Group.selected?.[0];
-    const undoOptions = {
-      outliner: true,
-      elements: [],
-      selection: true
-    };
-    Undo.initEdit(undoOptions);
     const cube = new Cube({
       name: data.name || "text_display",
       from: data.from || [-4, 0, -0.5],
@@ -1039,12 +1033,13 @@
       visibility: true
     });
     cube.text_content = data.content ?? TEXT_DISPLAY_DEFAULT_CONTENT;
-    cube.text_color = colorToHex(data.text_color ?? TEXT_DISPLAY_DEFAULT_COLOR);
-    cube.text_background = colorToHex(data.background_color ?? TEXT_DISPLAY_DEFAULT_BACKGROUND);
+    cube.text_color = colorToString(data.text_color ?? TEXT_DISPLAY_DEFAULT_COLOR);
+    cube.text_background = colorToString(data.background_color ?? TEXT_DISPLAY_DEFAULT_BACKGROUND);
     cube.text_background_enabled = data.background_enabled ?? TEXT_DISPLAY_DEFAULT_BACKGROUND_ENABLED;
     cube.text_alignment = data.alignment ?? TEXT_DISPLAY_DEFAULT_ALIGNMENT;
     cube.text_padding = data.padding ?? TEXT_DISPLAY_DEFAULT_PADDING;
     cube.is_text_display = true;
+    Undo.initEdit({ elements: [cube], outliner: true });
     if (targetGroup) {
       cube.addTo(targetGroup).init();
     } else {
@@ -1514,7 +1509,7 @@
   }
   function onRenderFrame() {
     for (const cube of allTextDisplays) {
-      if (cube && cube.is_text_display && cube.mesh) {
+      if (cube && cube.is_text_display && cube.mesh && cube.mesh.parent) {
         if (cube.mesh.visible) {
           cube.mesh.visible = false;
         }
