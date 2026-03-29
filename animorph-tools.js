@@ -1659,12 +1659,38 @@
   var saveLayerAction = null;
   var deleteHandler = null;
   var toggleVisibilityAction = null;
+  var exportLayerAnimAction = null;
   var layerSaveObserver = null;
   var ctrlSHandler = null;
   var compileFilterHandlers = [];
   var animCompileFilterHandler = null;
   var layerAnimBuffer = /* @__PURE__ */ new Map();
   var compileFlushTimer = null;
+  function guid() {
+    return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = Math.random() * 16 | 0;
+      return (c === "x" ? r : r & 3 | 8).toString(16);
+    });
+  }
+  function findBoneUuidInBBModel(bbmodel, boneName) {
+    if (!bbmodel.outliner)
+      return null;
+    function search(nodes) {
+      for (const node of nodes) {
+        if (node && typeof node === "object") {
+          if (node.name === boneName && node.uuid)
+            return node.uuid;
+          if (node.children) {
+            const found = search(node.children.filter((c) => typeof c === "object"));
+            if (found)
+              return found;
+          }
+        }
+      }
+      return null;
+    }
+    return search(bbmodel.outliner);
+  }
   var SUPPORTED_FORMATS = [
     "animated_entity_model",
     "geckolib_model",
@@ -2312,8 +2338,12 @@
     updateMultiTexturesState();
     Canvas.updateAll();
     if (file.path) {
-      const animPath = getLayerAnimPath(file.path);
-      setTimeout(() => loadLayerAnimations(animPath), 200);
+      if (isBBModelLayer(file.path)) {
+        setTimeout(() => loadAnimationsFromBBModel(json, layerName), 200);
+      } else {
+        const animPath = getLayerAnimPath(file.path);
+        setTimeout(() => loadLayerAnimations(animPath), 200);
+      }
     }
     Blockbench.showQuickMessage(`Imported layer: ${layerName} (UV: ${uvWidth}x${uvHeight})`);
     debugLog(`[Layers] Imported layer: ${layerName} with ${groups.length} groups, ${cubes.length} cubes, UV: ${uvWidth}x${uvHeight}`);
@@ -2531,18 +2561,81 @@
       Blockbench.showQuickMessage("No source file path for this layer", 2e3);
       return;
     }
-    if (filePath.endsWith(".bbmodel")) {
-      Blockbench.showQuickMessage("Saving .bbmodel layers is not supported yet \u2014 only .geo.json", 2e3);
-      return;
-    }
-    try {
-      const json = serializeLayerToBedrock(collection);
-      const fs = requireNativeModule("fs");
-      fs.writeFileSync(filePath, JSON.stringify(json, null, 2), "utf-8");
-      Blockbench.showQuickMessage(`Saved layer: ${collection.name}`);
-    } catch (e) {
-      console.error("[Layers] Error saving layer:", e);
-      Blockbench.showQuickMessage(`Error saving layer: ${collection.name}`, 2e3);
+    const fs = requireNativeModule("fs");
+    if (isBBModelLayer(filePath)) {
+      try {
+        const bbmodelContent = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        const animJson = serializeLayerAnimations(collection);
+        if (animJson && Object.keys(animJson.animations).length > 0) {
+          if (!bbmodelContent.animations) {
+            bbmodelContent.animations = [];
+          }
+          for (const [animName, animData] of Object.entries(animJson.animations)) {
+            let bbAnim = bbmodelContent.animations.find((a) => a.name === animName);
+            if (!bbAnim) {
+              bbAnim = {
+                uuid: guid(),
+                name: animName,
+                loop: "once",
+                override: false,
+                length: 0,
+                snapping: 24,
+                animators: {}
+              };
+              bbmodelContent.animations.push(bbAnim);
+            }
+            if (animData.animation_length)
+              bbAnim.length = animData.animation_length;
+            if (animData.loop === true)
+              bbAnim.loop = "loop";
+            else if (animData.loop === "hold_on_last_frame")
+              bbAnim.loop = "hold";
+            else if (animData.loop !== void 0)
+              bbAnim.loop = "once";
+            if (!bbAnim.animators)
+              bbAnim.animators = {};
+            for (const [boneName, boneData] of Object.entries(animData.bones)) {
+              const boneUuid = findBoneUuidInBBModel(bbmodelContent, boneName);
+              const animatorKey = boneUuid || boneName;
+              const keyframes = [];
+              for (const channel of ["rotation", "position", "scale"]) {
+                if (!boneData[channel])
+                  continue;
+                for (const [timeStr, val] of Object.entries(boneData[channel])) {
+                  const values = Array.isArray(val) ? val : val?.vector || [0, 0, 0];
+                  keyframes.push({
+                    channel,
+                    data_points: [{ x: values[0], y: values[1], z: values[2] }],
+                    uuid: guid(),
+                    time: parseFloat(timeStr),
+                    color: -1,
+                    interpolation: val?.lerp_mode || "linear"
+                  });
+                }
+              }
+              bbAnim.animators[animatorKey] = {
+                name: boneName,
+                type: "bone",
+                keyframes
+              };
+            }
+          }
+        }
+        fs.writeFileSync(filePath, JSON.stringify(bbmodelContent, null, 2), "utf-8");
+        Blockbench.showQuickMessage(`Saved layer: ${collection.name}`);
+      } catch (e) {
+        console.error("[Layers] Error saving bbmodel layer:", e);
+        Blockbench.showQuickMessage(`Error saving layer: ${collection.name}`, 2e3);
+      }
+    } else {
+      try {
+        const json = serializeLayerToBedrock(collection);
+        fs.writeFileSync(filePath, JSON.stringify(json, null, 2), "utf-8");
+        Blockbench.showQuickMessage(`Saved layer: ${collection.name}`);
+      } catch (e) {
+        console.error("[Layers] Error saving layer:", e);
+        Blockbench.showQuickMessage(`Error saving layer: ${collection.name}`, 2e3);
+      }
     }
   }
   function injectSaveButtons() {
@@ -2762,37 +2855,109 @@
         console.log(`[Layers:Flush] No collection/export_path found for layer "${layerName}"`);
         continue;
       }
-      const animPath = getLayerAnimPath(collection.export_path);
-      console.log(`[Layers:Flush] Animation file path: ${animPath}`);
-      let existing = { format_version: "1.8.0", animations: {} };
-      try {
-        if (fs.existsSync(animPath)) {
-          existing = JSON.parse(fs.readFileSync(animPath, "utf-8"));
-          console.log(`[Layers:Flush] Loaded existing file with animations: [${Object.keys(existing.animations).join(", ")}]`);
-        } else {
-          console.log(`[Layers:Flush] No existing file, starting fresh`);
-        }
-      } catch (e) {
-      }
+      const mergedAnims = {};
       for (const [animName, animData] of animsMap) {
-        const key = animName;
-        console.log(`[Layers:Flush] Merging animation "${key}" with ${Object.keys(animData.bones).length} bones:`, Object.keys(animData.bones));
-        if (!existing.animations[key]) {
-          existing.animations[key] = { bones: {} };
+        console.log(`[Layers:Flush] Merging animation "${animName}" with ${Object.keys(animData.bones).length} bones:`, Object.keys(animData.bones));
+        if (!mergedAnims[animName]) {
+          mergedAnims[animName] = { bones: {} };
         }
-        Object.assign(existing.animations[key].bones, animData.bones);
+        Object.assign(mergedAnims[animName].bones, animData.bones);
         if (animData.length)
-          existing.animations[key].animation_length = animData.length;
+          mergedAnims[animName].animation_length = animData.length;
         if (animData.loop !== void 0)
-          existing.animations[key].loop = animData.loop;
+          mergedAnims[animName].loop = animData.loop;
       }
-      console.log(`[Layers:Flush] Final file content:`, JSON.stringify(existing, null, 2));
-      try {
-        fs.writeFileSync(animPath, JSON.stringify(existing, null, 2), "utf-8");
-        Blockbench.showQuickMessage(`Layer animations saved: ${layerName}`);
-        debugLog(`[Layers] Flushed animations to: ${animPath}`);
-      } catch (e) {
-        console.error("[Layers] Error writing layer animations:", e);
+      if (isBBModelLayer(collection.export_path)) {
+        try {
+          const bbmodelContent = JSON.parse(fs.readFileSync(collection.export_path, "utf-8"));
+          if (!bbmodelContent.animations) {
+            bbmodelContent.animations = [];
+          }
+          for (const [animName, animJson] of Object.entries(mergedAnims)) {
+            let bbAnim = bbmodelContent.animations.find((a) => a.name === animName);
+            if (!bbAnim) {
+              bbAnim = {
+                uuid: guid(),
+                name: animName,
+                loop: "once",
+                override: false,
+                length: 0,
+                snapping: 24,
+                animators: {}
+              };
+              bbmodelContent.animations.push(bbAnim);
+            }
+            if (animJson.animation_length)
+              bbAnim.length = animJson.animation_length;
+            if (animJson.loop === true)
+              bbAnim.loop = "loop";
+            else if (animJson.loop === "hold_on_last_frame")
+              bbAnim.loop = "hold";
+            else if (animJson.loop !== void 0)
+              bbAnim.loop = "once";
+            if (!bbAnim.animators)
+              bbAnim.animators = {};
+            for (const [boneName, boneData] of Object.entries(animJson.bones)) {
+              const boneUuid = findBoneUuidInBBModel(bbmodelContent, boneName);
+              const animatorKey = boneUuid || boneName;
+              const keyframes = [];
+              for (const channel of ["rotation", "position", "scale"]) {
+                if (!boneData[channel])
+                  continue;
+                for (const [timeStr, val] of Object.entries(boneData[channel])) {
+                  const values = Array.isArray(val) ? val : val?.vector || [0, 0, 0];
+                  keyframes.push({
+                    channel,
+                    data_points: [{ x: values[0], y: values[1], z: values[2] }],
+                    uuid: guid(),
+                    time: parseFloat(timeStr),
+                    color: -1,
+                    interpolation: val?.lerp_mode || "linear"
+                  });
+                }
+              }
+              bbAnim.animators[animatorKey] = {
+                name: boneName,
+                type: "bone",
+                keyframes
+              };
+            }
+          }
+          fs.writeFileSync(collection.export_path, JSON.stringify(bbmodelContent, null, 2), "utf-8");
+          Blockbench.showQuickMessage(`Layer animations saved into: ${PathModule.basename(collection.export_path)}`);
+          debugLog(`[Layers] Flushed animations into bbmodel: ${collection.export_path}`);
+        } catch (e) {
+          console.error("[Layers] Error writing animations to bbmodel:", e);
+        }
+      } else {
+        const animPath = getLayerAnimPath(collection.export_path);
+        console.log(`[Layers:Flush] Animation file path: ${animPath}`);
+        let existing = { format_version: "1.8.0", animations: {} };
+        try {
+          if (fs.existsSync(animPath)) {
+            existing = JSON.parse(fs.readFileSync(animPath, "utf-8"));
+            console.log(`[Layers:Flush] Loaded existing file with animations: [${Object.keys(existing.animations).join(", ")}]`);
+          }
+        } catch (e) {
+        }
+        for (const [animName, animJson] of Object.entries(mergedAnims)) {
+          if (!existing.animations[animName]) {
+            existing.animations[animName] = { bones: {} };
+          }
+          Object.assign(existing.animations[animName].bones, animJson.bones);
+          if (animJson.length)
+            existing.animations[animName].animation_length = animJson.length;
+          if (animJson.loop !== void 0)
+            existing.animations[animName].loop = animJson.loop;
+        }
+        console.log(`[Layers:Flush] Final file content:`, JSON.stringify(existing, null, 2));
+        try {
+          fs.writeFileSync(animPath, JSON.stringify(existing, null, 2), "utf-8");
+          Blockbench.showQuickMessage(`Layer animations saved: ${layerName}`);
+          debugLog(`[Layers] Flushed animations to: ${animPath}`);
+        } catch (e) {
+          console.error("[Layers] Error writing layer animations:", e);
+        }
       }
     }
     layerAnimBuffer.clear();
@@ -2807,6 +2972,106 @@
       Blockbench.removeListener("compile_bedrock_animation", animCompileFilterHandler);
       animCompileFilterHandler = null;
     }
+  }
+  function serializeLayerAnimations(collection) {
+    const layerName = collection.name;
+    const prefix = layerName + LAYER_SEPARATOR2;
+    const elementUuids = new Set(collection.layer_elements || []);
+    const uuidToExportName = /* @__PURE__ */ new Map();
+    const nameToExportName = /* @__PURE__ */ new Map();
+    for (const group of Group.all) {
+      if (elementUuids.has(group.uuid)) {
+        const name = group.name || "";
+        const exportName = name.startsWith(prefix) ? name.substring(prefix.length) : name;
+        uuidToExportName.set(group.uuid, exportName);
+        nameToExportName.set(name, exportName);
+      }
+    }
+    console.log(`[Layers] layer_elements count: ${elementUuids.size}`);
+    console.log(`[Layers] layer_elements:`, [...elementUuids]);
+    if (uuidToExportName.size === 0) {
+      console.log(`[Layers] No layer groups found in Group.all matching layer_elements`);
+      console.log(`[Layers] Group.all names:`, Group.all.map((g) => `${g.name} (${g.uuid})`));
+      return null;
+    }
+    console.log(`[Layers] Serializing animations for layer "${layerName}" \u2014 ${uuidToExportName.size} bones tracked`);
+    console.log(`[Layers]   UUID map:`, Object.fromEntries(uuidToExportName));
+    console.log(`[Layers]   Name map:`, Object.fromEntries(nameToExportName));
+    console.log(`[Layers] Animation.all count: ${Animation.all.length}`);
+    const animations = {};
+    let hasAnimations = false;
+    for (const anim of Animation.all) {
+      if (!anim.animators)
+        continue;
+      console.log(`[Layers] --- Animation "${anim.name}" --- animators:`);
+      for (const k in anim.animators) {
+        const a = anim.animators[k];
+        const kfCount = a?.keyframes?.length || 0;
+        const uMatch = uuidToExportName.has(k);
+        const nMatch = a?.name ? nameToExportName.has(a.name) : false;
+        console.log(`[Layers]   key="${k}" name="${a?.name}" type="${a?.type}" kf=${kfCount} uuid_match=${uMatch} name_match=${nMatch}`);
+      }
+      const bones = {};
+      let hasBones = false;
+      for (const key in anim.animators) {
+        const animator = anim.animators[key];
+        if (!animator?.keyframes || animator.keyframes.length === 0)
+          continue;
+        let exportName = uuidToExportName.get(key);
+        if (exportName === void 0 && animator.name) {
+          exportName = nameToExportName.get(animator.name);
+        }
+        if (exportName === void 0)
+          continue;
+        const channels = {};
+        for (const kf of animator.keyframes) {
+          const ch = kf.channel || "rotation";
+          if (!channels[ch])
+            channels[ch] = [];
+          const entry = {
+            timestamp: kf.time,
+            values: kf.data_points?.[0] ? [kf.data_points[0].x, kf.data_points[0].y, kf.data_points[0].z] : [0, 0, 0]
+          };
+          if (kf.interpolation && kf.interpolation !== "linear") {
+            entry.lerp_mode = kf.interpolation;
+          }
+          channels[ch].push(entry);
+        }
+        const boneAnim = {};
+        for (const [channel, keyframes] of Object.entries(channels)) {
+          const kfObj = {};
+          for (const kf of keyframes) {
+            const timeStr = String(kf.timestamp);
+            const val = { vector: kf.values };
+            if (kf.lerp_mode)
+              val.lerp_mode = kf.lerp_mode;
+            kfObj[timeStr] = kf.lerp_mode ? val : kf.values;
+          }
+          boneAnim[channel] = kfObj;
+        }
+        bones[exportName] = boneAnim;
+        hasBones = true;
+      }
+      if (hasBones) {
+        const animJson = {
+          animation_length: anim.length,
+          bones
+        };
+        if (anim.loop && anim.loop !== "once") {
+          animJson.loop = anim.loop === "loop" ? true : anim.loop;
+        }
+        animations[anim.name] = animJson;
+        hasAnimations = true;
+      }
+    }
+    if (!hasAnimations) {
+      debugLog(`[Layers] No animations found for layer "${layerName}"`);
+      return null;
+    }
+    return {
+      format_version: "1.8.0",
+      animations
+    };
   }
   function loadLayerAnimations(animFilePath) {
     if (!isApp || !animFilePath)
@@ -2826,9 +3091,153 @@
       console.error("[Layers] Error loading layer animations:", e);
     }
   }
+  function loadAnimationsFromBBModel(bbmodelJson, layerName) {
+    if (!bbmodelJson.animations || !Array.isArray(bbmodelJson.animations) || bbmodelJson.animations.length === 0) {
+      debugLog(`[Layers] No animations found in bbmodel for layer "${layerName}"`);
+      return;
+    }
+    const bedrockAnims = {};
+    for (const bbAnim of bbmodelJson.animations) {
+      if (!bbAnim.name || !bbAnim.animators)
+        continue;
+      const bones = {};
+      for (const [_key, animator] of Object.entries(bbAnim.animators)) {
+        if (!animator?.name || animator.type !== "bone")
+          continue;
+        if (!animator.keyframes || animator.keyframes.length === 0)
+          continue;
+        const boneAnim = {};
+        for (const kf of animator.keyframes) {
+          const channel = kf.channel || "rotation";
+          if (!boneAnim[channel])
+            boneAnim[channel] = {};
+          const dp = kf.data_points?.[0];
+          const values = dp ? [
+            parseFloat(dp.x) || 0,
+            parseFloat(dp.y) || 0,
+            parseFloat(dp.z) || 0
+          ] : [0, 0, 0];
+          const timeStr = String(kf.time);
+          if (kf.interpolation && kf.interpolation !== "linear") {
+            boneAnim[channel][timeStr] = { vector: values, lerp_mode: kf.interpolation };
+          } else {
+            boneAnim[channel][timeStr] = values;
+          }
+        }
+        bones[animator.name] = boneAnim;
+      }
+      if (Object.keys(bones).length === 0)
+        continue;
+      const animJson = { bones };
+      if (bbAnim.length)
+        animJson.animation_length = bbAnim.length;
+      if (bbAnim.loop === "loop")
+        animJson.loop = true;
+      else if (bbAnim.loop === "hold")
+        animJson.loop = "hold_on_last_frame";
+      bedrockAnims[bbAnim.name] = animJson;
+    }
+    if (Object.keys(bedrockAnims).length === 0)
+      return;
+    const bedrockJson = {
+      format_version: "1.8.0",
+      animations: bedrockAnims
+    };
+    try {
+      Animator.importFile({
+        name: `${layerName}.animation.json`,
+        path: "",
+        content: JSON.stringify(bedrockJson)
+      });
+      debugLog(`[Layers] Loaded ${Object.keys(bedrockAnims).length} animations from bbmodel for layer "${layerName}"`);
+    } catch (e) {
+      console.error("[Layers] Error loading animations from bbmodel:", e);
+    }
+  }
+  function isBBModelLayer(filePath) {
+    return filePath.toLowerCase().endsWith(".bbmodel");
+  }
   function getLayerAnimPath(geoPath) {
+    if (isBBModelLayer(geoPath)) {
+      return geoPath.replace(/\.bbmodel$/i, ".animation.json");
+    }
     const ext = geoPath.match(/\.\w+$/)?.[0] || ".json";
     return geoPath.replace(ext, `.animation${ext}`);
+  }
+  function exportLayerAnimations(collection) {
+    if (!collection || collection.export_codec !== "animorph_layer")
+      return;
+    const layerName = collection.name;
+    const prefix = layerName + LAYER_SEPARATOR2;
+    const elementUuids = new Set(collection.layer_elements || []);
+    const nameMap = /* @__PURE__ */ new Map();
+    for (const group of Group.all) {
+      if (elementUuids.has(group.uuid)) {
+        const name = group.name || "";
+        const exportName = name.startsWith(prefix) ? name.substring(prefix.length) : name;
+        nameMap.set(name, exportName);
+      }
+    }
+    if (nameMap.size === 0) {
+      Blockbench.showQuickMessage("No layer bones found", 2e3);
+      return;
+    }
+    if (animCompileFilterHandler) {
+      Blockbench.removeListener("compile_bedrock_animation", animCompileFilterHandler);
+    }
+    try {
+      const codec = Codecs.bedrock_animation;
+      if (!codec || !codec.compile) {
+        Blockbench.showQuickMessage("Animation codec not available", 2e3);
+        return;
+      }
+      const compiled = codec.compile();
+      const fullJson = typeof compiled === "string" ? JSON.parse(compiled) : compiled;
+      if (!fullJson?.animations || Object.keys(fullJson.animations).length === 0) {
+        Blockbench.showQuickMessage("No animations found", 2e3);
+        return;
+      }
+      const filteredAnims = {};
+      for (const [animName, animData] of Object.entries(fullJson.animations)) {
+        if (!animData.bones)
+          continue;
+        const filteredBones = {};
+        for (const [boneName, boneData] of Object.entries(animData.bones)) {
+          if (nameMap.has(boneName)) {
+            filteredBones[nameMap.get(boneName)] = boneData;
+          }
+        }
+        if (Object.keys(filteredBones).length > 0) {
+          filteredAnims[animName] = { ...animData, bones: filteredBones };
+        }
+      }
+      if (Object.keys(filteredAnims).length === 0) {
+        Blockbench.showQuickMessage("No animations found for this layer", 2e3);
+        return;
+      }
+      const exportJson = {
+        format_version: fullJson.format_version || "1.8.0",
+        animations: filteredAnims
+      };
+      const defaultName = layerName + ".animation.json";
+      Blockbench.export({
+        type: "JSON Animation",
+        extensions: ["json"],
+        name: defaultName,
+        content: JSON.stringify(exportJson, null, 2),
+        savetype: "text"
+      }, (path) => {
+        Blockbench.showQuickMessage(`Exported layer animations: ${PathModule.basename(path.path || path)}`);
+        debugLog(`[Layers] Exported layer animations to: ${path.path || path}`);
+      });
+    } catch (e) {
+      console.error("[Layers] Error exporting layer animations:", e);
+      Blockbench.showQuickMessage("Error exporting layer animations", 2e3);
+    } finally {
+      if (animCompileFilterHandler) {
+        Blockbench.on("compile_bedrock_animation", animCompileFilterHandler);
+      }
+    }
   }
   function registerLayerActions() {
     importLayerAction = new Action("animorph_import_layer", {
@@ -2923,6 +3332,21 @@
         }
       }
     });
+    exportLayerAnimAction = new Action("animorph_export_layer_animations", {
+      name: "Export Layer Animations",
+      icon: "movie_filter",
+      description: "Export this layer's animations as a separate .animation.json file",
+      condition: () => {
+        return Collection.selected.length > 0 && Collection.selected.some((c) => c.export_codec === "animorph_layer");
+      },
+      click: () => {
+        for (const collection of Collection.selected) {
+          if (collection.export_codec === "animorph_layer") {
+            exportLayerAnimations(collection);
+          }
+        }
+      }
+    });
     deleteHandler = SharedActions.add("delete", {
       subject: "animorph_layer_collection",
       priority: 1,
@@ -2955,8 +3379,9 @@
     }
     if (Collection.prototype.menu) {
       Collection.prototype.menu.addAction(saveLayerAction, 9);
-      Collection.prototype.menu.addAction(reloadLayerAction, 10);
-      Collection.prototype.menu.addAction(toggleVisibilityAction, 11);
+      Collection.prototype.menu.addAction(exportLayerAnimAction, 10);
+      Collection.prototype.menu.addAction(reloadLayerAction, 11);
+      Collection.prototype.menu.addAction(toggleVisibilityAction, 12);
     }
     setupSaveButtonObserver();
     setupCtrlSHook();
@@ -2974,6 +3399,7 @@
     }
     if (Collection.prototype.menu) {
       Collection.prototype.menu.removeAction("animorph_save_layer");
+      Collection.prototype.menu.removeAction("animorph_export_layer_animations");
       Collection.prototype.menu.removeAction("animorph_reload_layer");
       Collection.prototype.menu.removeAction("animorph_toggle_layer_visibility");
     }
@@ -2996,6 +3422,10 @@
     if (toggleVisibilityAction) {
       toggleVisibilityAction.delete();
       toggleVisibilityAction = null;
+    }
+    if (exportLayerAnimAction) {
+      exportLayerAnimAction.delete();
+      exportLayerAnimAction = null;
     }
     if (deleteHandler) {
       deleteHandler.delete();
