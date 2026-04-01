@@ -228,6 +228,7 @@
 
   // src/handlers/io.ts
   var originalAnimationImport = null;
+  var originalBlockbenchImport = null;
   var LAYER_SEPARATOR = ".";
   function remapLayerBoneNamesInJson(jsonContent) {
     if (!jsonContent?.animations || typeof Collection === "undefined")
@@ -272,10 +273,12 @@
       debugLog("\u2713 Interceptando Animator.importFile");
       originalAnimationImport = Animator.importFile;
       Animator.importFile = function(file) {
+        debugLog("=== ANIMATOR IMPORT FILE ===");
         if (!isBedrockFormat()) {
+          debugLog("  Formato no Bedrock, saltando captura de loop_start");
           return originalAnimationImport.call(this, file);
         }
-        debugLog("=== ANIMATOR IMPORT FILE (Bedrock/GeckoLib) ===");
+        debugLog("  Formato Bedrock/GeckoLib detectado");
         if (file && file.content) {
           try {
             const jsonContent = JSON.parse(file.content);
@@ -294,6 +297,7 @@
         return result;
       };
     }
+    interceptBlockbenchImport();
   }
   function processImportedAnimations() {
     const jsonContent = window._tempAnimationJson;
@@ -316,10 +320,44 @@
     }
     delete window._tempAnimationJson;
   }
+  function interceptBlockbenchImport() {
+    const Blockbench2 = window.Blockbench;
+    if (!Blockbench2?.import)
+      return;
+    originalBlockbenchImport = Blockbench2.import;
+    Blockbench2.import = function(options, callback, ...rest) {
+      const newCallback = (files) => {
+        if (Array.isArray(files)) {
+          for (const file of files) {
+            try {
+              const content = file.content ?? file.data ?? "";
+              if (typeof content === "string" && content.trim().startsWith("{")) {
+                const parsed = JSON.parse(content);
+                if (parsed?.animations && typeof parsed.animations === "object") {
+                  window._tempAnimationJson = parsed;
+                  debugLog("\u2713 Animaci\xF3n capturada via Blockbench.import");
+                }
+              }
+            } catch {
+            }
+          }
+        }
+        callback(files);
+        setTimeout(processImportedAnimations, 100);
+      };
+      return originalBlockbenchImport.call(this, options, newCallback, ...rest);
+    };
+    debugLog("\u2713 Interceptado Blockbench.import");
+  }
   function restoreAnimationImport() {
     if (originalAnimationImport && Animator) {
       Animator.importFile = originalAnimationImport;
       debugLog("\u2713 Restaurado Animator.importFile");
+    }
+    const Blockbench2 = window.Blockbench;
+    if (originalBlockbenchImport && Blockbench2) {
+      Blockbench2.import = originalBlockbenchImport;
+      debugLog("\u2713 Restaurado Blockbench.import");
     }
   }
   function onCompileAnimation(data) {
@@ -330,17 +368,24 @@
     }
   }
   function onParseBedrock(data) {
-    if (!isBedrockFormat())
-      return;
     debugLog("=== PARSE BEDROCK LLAMADO ===");
     debugLog("  Animation:", data.animation?.name);
     debugLog("  loop_start en JSON:", data.json?.loop_start);
     if (data.json && data.json.loop_start !== void 0) {
-      data.animation.loop_start = data.json.loop_start;
-      debugLog(`\u2713 Loop start asignado: ${data.json.loop_start}s`);
-      if (Animation.selected === data.animation) {
-        updateLoopStartMarker();
-      }
+      const loopStart = data.json.loop_start;
+      const animName = data.animation?.name;
+      data.animation.loop_start = loopStart;
+      debugLog(`\u2713 Loop start asignado inmediatamente: ${loopStart}s`);
+      setTimeout(() => {
+        const finalAnim = Animation.all.find((a) => a.name === animName);
+        if (finalAnim && finalAnim.loop_start !== loopStart) {
+          finalAnim.loop_start = loopStart;
+          debugLog(`\u2713 Loop start aplicado post-parse en "${animName}": ${loopStart}s`);
+        }
+        if (Animation.selected?.name === animName) {
+          updateLoopStartMarker();
+        }
+      }, 100);
     }
   }
 
@@ -1834,9 +1879,17 @@
         }
       }
     }
+    const faceNames = ["north", "east", "south", "west", "up", "down"];
     for (const cube of Cube.all) {
       if (layerCubeUuids.has(cube.uuid))
         continue;
+      if (cube.faces) {
+        for (const faceName of faceNames) {
+          if (cube.faces[faceName]) {
+            cube.faces[faceName].texture = mainTexture.uuid;
+          }
+        }
+      }
       if (cube.mesh && mainTexture.getMaterial) {
         const material = mainTexture.getMaterial();
         if (material) {
@@ -3186,13 +3239,59 @@
       Blockbench.removeListener("compile_bedrock_animation", animCompileFilterHandler);
     }
     try {
-      const codec = Codecs.bedrock_animation;
-      if (!codec || !codec.compile) {
-        Blockbench.showQuickMessage("Animation codec not available", 2e3);
-        return;
+      const allAnims = {};
+      for (const anim of Animation.all) {
+        const animJson = {
+          loop: anim.loop === "loop" ? true : anim.loop === "hold" ? "hold_on_last_frame" : false,
+          animation_length: anim.length || void 0
+        };
+        if (anim.override) {
+          animJson.override_previous_animation = true;
+        }
+        const bones = {};
+        if (anim.animators) {
+          for (const uuid in anim.animators) {
+            const animator = anim.animators[uuid];
+            if (!animator || animator.type !== "bone" || !animator.keyframes?.length)
+              continue;
+            const boneName = animator.name;
+            const boneData = {};
+            for (const kf of animator.keyframes) {
+              const channel = kf.channel;
+              if (!channel)
+                continue;
+              if (!boneData[channel]) {
+                boneData[channel] = {};
+              }
+              const timeKey = kf.time.toString();
+              const dp = kf.data_points?.[0];
+              if (!dp)
+                continue;
+              const values = [
+                typeof dp.x === "number" ? dp.x : parseFloat(dp.x) || 0,
+                typeof dp.y === "number" ? dp.y : parseFloat(dp.y) || 0,
+                typeof dp.z === "number" ? dp.z : parseFloat(dp.z) || 0
+              ];
+              if (kf.interpolation === "linear" || !kf.interpolation) {
+                boneData[channel][timeKey] = values;
+              } else if (kf.interpolation === "catmullrom") {
+                boneData[channel][timeKey] = { vector: values, lerp_mode: "catmullrom" };
+              } else {
+                boneData[channel][timeKey] = values;
+              }
+            }
+            bones[boneName] = boneData;
+          }
+        }
+        if (Object.keys(bones).length > 0) {
+          animJson.bones = bones;
+        }
+        allAnims[anim.name] = animJson;
       }
-      const compiled = codec.compile();
-      const fullJson = typeof compiled === "string" ? JSON.parse(compiled) : compiled;
+      const fullJson = {
+        format_version: "1.8.0",
+        animations: allAnims
+      };
       if (!fullJson?.animations || Object.keys(fullJson.animations).length === 0) {
         Blockbench.showQuickMessage("No animations found", 2e3);
         return;
@@ -5447,11 +5546,6 @@
   }
 
   // src/sync/project-config.ts
-  var DESTINATION_PATHS = {
-    model: "models/",
-    animation: "animations/",
-    texture: "textures/"
-  };
   function resolvePathForType(config, type) {
     const overrideMap = {
       model: config.model_path,
@@ -5548,12 +5642,11 @@
         type: "model",
         timestamp: Date.now(),
         asset_path: assetPath,
-        destination: DESTINATION_PATHS.model,
         data: { model: getModelName(), geometry }
       };
       connection.send(message);
       this.lastSyncTime = Date.now();
-      debugLog(`[SyncManager] Model sent \u2192 ${DESTINATION_PATHS.model}${assetPath}`);
+      debugLog(`[SyncManager] Model sent \u2192 ${assetPath}`);
     }
     /**
      * Envía las animaciones en formato Bedrock
@@ -5571,7 +5664,6 @@
         type: "animation",
         timestamp: Date.now(),
         asset_path: assetPath,
-        destination: DESTINATION_PATHS.animation,
         data: {
           model: getModelName(),
           ...bedrockAnimations
@@ -5579,7 +5671,7 @@
       };
       connection.send(message);
       this.lastSyncTime = Date.now();
-      debugLog(`[SyncManager] Animations sent \u2192 ${DESTINATION_PATHS.animation}${assetPath}`);
+      debugLog(`[SyncManager] Animations sent \u2192 ${assetPath}`);
     }
     /**
      * Envía las texturas
@@ -5597,12 +5689,11 @@
         type: "texture",
         timestamp: Date.now(),
         asset_path: assetPath,
-        destination: DESTINATION_PATHS.texture,
         data: { model: getModelName(), textures }
       };
       connection.send(message);
       this.lastSyncTime = Date.now();
-      debugLog(`[SyncManager] Textures sent \u2192 ${DESTINATION_PATHS.texture}${assetPath}`);
+      debugLog(`[SyncManager] Textures sent \u2192 ${assetPath}`);
     }
     /**
      * Obtiene el tiempo desde la última sincronización
@@ -5688,17 +5779,17 @@
           resolvedModelPath() {
             const formData = dialog.getFormResult();
             const mp = formData.model_path?.trim();
-            return DESTINATION_PATHS.model + (mp || formData.asset_path || "entity/model");
+            return mp || formData.asset_path || "entity/model";
           },
           resolvedAnimationPath() {
             const formData = dialog.getFormResult();
             const ap = formData.animation_path?.trim();
-            return DESTINATION_PATHS.animation + (ap || formData.asset_path || "entity/model");
+            return ap || formData.asset_path || "entity/model";
           },
           resolvedTexturePath() {
             const formData = dialog.getFormResult();
             const tp = formData.texture_path?.trim();
-            return DESTINATION_PATHS.texture + (tp || formData.asset_path || "entity/model");
+            return tp || formData.asset_path || "entity/model";
           }
         },
         methods: {
@@ -5923,6 +6014,620 @@
       syncDialogAction = null;
     }
     debugLog("\u2713 Sync actions unregistered");
+  }
+
+  // src/model-config/types.ts
+  var DEFAULT_FIRST_PERSON = {
+    show_equipment: false,
+    model: {
+      show: false,
+      offset: { x: 0, y: 0, z: 0 }
+    },
+    custom_arms: {
+      show: false,
+      custom_render_items: false,
+      both_hands: false
+    }
+  };
+  var DEFAULT_EQUIPMENT = {
+    head: "",
+    chest: "",
+    legs: "",
+    feet: "",
+    cape: "",
+    elytra: ""
+  };
+  function createDefaultModelConfig(projectName) {
+    return {
+      display_name: projectName || "model",
+      animation: `${projectName || "model"}.animation.json`,
+      properties: {
+        first_person: { ...DEFAULT_FIRST_PERSON, model: { ...DEFAULT_FIRST_PERSON.model, offset: { x: 0, y: 0, z: 0 } }, custom_arms: { ...DEFAULT_FIRST_PERSON.custom_arms } },
+        animation_controllers: [],
+        fp_animation_controllers: [],
+        texts: {}
+      },
+      equipment: { ...DEFAULT_EQUIPMENT },
+      layers: {}
+    };
+  }
+
+  // src/model-config/storage.ts
+  var STORAGE_PREFIX2 = "animorph_model_config_";
+  function storageKey2() {
+    const uuid = Project?.uuid || "default";
+    return STORAGE_PREFIX2 + uuid;
+  }
+  function saveModelConfig(config) {
+    try {
+      localStorage.setItem(storageKey2(), JSON.stringify(config));
+      debugLog("[ModelConfig] Saved");
+    } catch (e) {
+      console.error("[ModelConfig] Error saving:", e);
+    }
+  }
+  function loadModelConfig() {
+    try {
+      const raw = localStorage.getItem(storageKey2());
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch (e) {
+      console.error("[ModelConfig] Error loading:", e);
+    }
+    return createDefaultModelConfig(Project?.name || "model");
+  }
+
+  // src/model-config/yaml-export.ts
+  function generateModelYaml(config) {
+    let yml = "";
+    yml += `display_name: ${config.display_name}
+`;
+    yml += `animation: ${config.animation}
+`;
+    yml += `properties:
+`;
+    const fp = config.properties.first_person;
+    yml += `  first_person:
+`;
+    yml += `    show_equipment: ${fp.show_equipment}
+`;
+    yml += `    model:
+`;
+    yml += `      show: ${fp.model.show}
+`;
+    yml += `      offset:
+`;
+    yml += `        x: ${fp.model.offset.x}
+`;
+    yml += `        y: ${fp.model.offset.y}
+`;
+    yml += `        z: ${fp.model.offset.z}
+`;
+    yml += `    custom_arms:
+`;
+    yml += `      show: ${fp.custom_arms.show}
+`;
+    yml += `      custom_render_items: ${fp.custom_arms.custom_render_items}
+`;
+    yml += `      both_hands: ${fp.custom_arms.both_hands}
+`;
+    if (config.properties.animation_controllers.length > 0) {
+      yml += `  animation_controllers:
+`;
+      for (const ac of config.properties.animation_controllers) {
+        yml += `  - ${ac}
+`;
+      }
+    } else {
+      yml += `  animation_controllers: []
+`;
+    }
+    if (config.properties.fp_animation_controllers.length > 0) {
+      yml += `  fp_animation_controllers:
+`;
+      for (const ac of config.properties.fp_animation_controllers) {
+        yml += `  - ${ac}
+`;
+      }
+    }
+    const textKeys = Object.keys(config.properties.texts);
+    if (textKeys.length > 0) {
+      yml += `  texts:
+`;
+      for (const key of textKeys) {
+        yml += `    '${key}': '${config.properties.texts[key]}'
+`;
+      }
+    }
+    const eq = config.equipment;
+    const hasEquipment = eq.head || eq.chest || eq.legs || eq.feet || eq.cape || eq.elytra;
+    if (hasEquipment) {
+      yml += `equipment:
+`;
+      if (eq.head)
+        yml += `  head: ${eq.head}
+`;
+      if (eq.chest)
+        yml += `  chest: ${eq.chest}
+`;
+      if (eq.legs)
+        yml += `  legs: ${eq.legs}
+`;
+      if (eq.feet)
+        yml += `  feet: ${eq.feet}
+`;
+      if (eq.cape)
+        yml += `  cape: ${eq.cape}
+`;
+      if (eq.elytra)
+        yml += `  elytra: ${eq.elytra}
+`;
+    }
+    const layerNames = Object.keys(config.layers);
+    if (layerNames.length > 0) {
+      yml += `layers:
+`;
+      for (const name of layerNames) {
+        const layer = config.layers[name];
+        yml += `  ${name}:
+`;
+        yml += `    type: ${layer.type}
+`;
+        if (layer.type === "model" && layer.model) {
+          yml += `    model: ${layer.model}
+`;
+        }
+        if (layer.type === "texture" && layer.texture) {
+          yml += `    texture: ${layer.texture}
+`;
+        }
+        yml += `    show_first_person: ${layer.show_first_person}
+`;
+        if (layer.hide_bones.length > 0) {
+          yml += `    hide_bones:
+`;
+          for (const bone of layer.hide_bones) {
+            yml += `    - ${bone}
+`;
+          }
+        }
+        if (layer.texture_layers.length > 0) {
+          yml += `    texture_layers:
+`;
+          for (const tl2 of layer.texture_layers) {
+            yml += `    - ${tl2}
+`;
+          }
+        }
+      }
+    }
+    return yml;
+  }
+  function exportModelYaml(config) {
+    const yml = generateModelYaml(config);
+    const fileName = (config.display_name || "model").replace(/\s+/g, "_") + ".yml";
+    Blockbench.export({
+      type: "YAML File",
+      extensions: ["yml"],
+      name: fileName,
+      content: yml,
+      savetype: "text"
+    }, (result) => {
+      const path = result?.path || result;
+      Blockbench.showQuickMessage(`Model config exported: ${typeof path === "string" ? path.split(/[/\\]/).pop() : fileName}`, 2e3);
+    });
+  }
+
+  // src/model-config/dialog.ts
+  function textsToEntries(map) {
+    return Object.entries(map).map(([key, value]) => ({ key, value }));
+  }
+  function entriesToTexts(entries) {
+    const result = {};
+    for (const e of entries) {
+      const k = e.key.trim();
+      const v = e.value.trim();
+      if (k)
+        result[k] = v;
+    }
+    return result;
+  }
+  function layersToEntries(layers) {
+    return Object.entries(layers).map(([name, l]) => ({
+      name,
+      type: l.type,
+      model: l.model || "",
+      texture: l.texture || "",
+      show_first_person: l.show_first_person,
+      hide_bones: l.hide_bones.join(", "),
+      texture_layers: l.texture_layers.join(", ")
+    }));
+  }
+  function entriesToLayers(entries) {
+    const result = {};
+    for (const e of entries) {
+      const name = e.name.trim();
+      if (!name)
+        continue;
+      result[name] = {
+        type: e.type,
+        model: e.type === "model" ? e.model.trim() || void 0 : void 0,
+        texture: e.type === "texture" ? e.texture.trim() || void 0 : void 0,
+        show_first_person: e.show_first_person,
+        hide_bones: parseList(e.hide_bones),
+        texture_layers: parseList(e.texture_layers)
+      };
+    }
+    return result;
+  }
+  function parseList(input) {
+    if (!input || !input.trim())
+      return [];
+    return input.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  }
+  function detectLayers() {
+    const entries = [];
+    if (typeof Collection === "undefined" || !Collection.all)
+      return entries;
+    for (const col of Collection.all) {
+      if (col.export_codec === "animorph_layer") {
+        entries.push({
+          name: col.name,
+          type: "model",
+          model: col.name,
+          texture: "",
+          show_first_person: true,
+          hide_bones: "",
+          texture_layers: ""
+        });
+      } else if (col.export_codec === "animorph_texture_layer") {
+        const texName = col.texture_layer_source ? col.texture_layer_source.split(/[/\\]/).pop() || col.name + ".png" : col.name + ".png";
+        entries.push({
+          name: col.name,
+          type: "texture",
+          model: "",
+          texture: texName,
+          show_first_person: true,
+          hide_bones: "",
+          texture_layers: ""
+        });
+      }
+    }
+    return entries;
+  }
+  function openModelConfigDialog() {
+    const config = loadModelConfig();
+    const detectedLayers = detectLayers();
+    const savedLayerNames = new Set(Object.keys(config.layers));
+    for (const detected of detectedLayers) {
+      if (!savedLayerNames.has(detected.name)) {
+        config.layers[detected.name] = {
+          type: detected.type,
+          model: detected.type === "model" ? detected.model : void 0,
+          texture: detected.type === "texture" ? detected.texture : void 0,
+          show_first_person: true,
+          hide_bones: [],
+          texture_layers: []
+        };
+      }
+    }
+    const fp = config.properties.first_person;
+    const dialog = new Dialog({
+      id: "animorph_model_config",
+      title: "Model Config (.yml)",
+      width: 650,
+      component: {
+        data: {
+          display_name: config.display_name,
+          animation: config.animation,
+          // First person
+          fp_show_equipment: fp.show_equipment,
+          fp_model_show: fp.model.show,
+          fp_offset_x: fp.model.offset.x,
+          fp_offset_y: fp.model.offset.y,
+          fp_offset_z: fp.model.offset.z,
+          fp_arms_show: fp.custom_arms.show,
+          fp_arms_render_items: fp.custom_arms.custom_render_items,
+          fp_arms_both_hands: fp.custom_arms.both_hands,
+          // Controllers
+          animation_controllers: config.properties.animation_controllers.join(", "),
+          fp_animation_controllers: config.properties.fp_animation_controllers.join(", "),
+          // Texts
+          texts: textsToEntries(config.properties.texts),
+          // Equipment
+          eq_head: config.equipment.head,
+          eq_chest: config.equipment.chest,
+          eq_legs: config.equipment.legs,
+          eq_feet: config.equipment.feet,
+          eq_cape: config.equipment.cape,
+          eq_elytra: config.equipment.elytra,
+          // Layers
+          layers: layersToEntries(config.layers)
+        },
+        methods: {
+          onAddText() {
+            this.texts.push({ key: "", value: "" });
+          },
+          onRemoveText(idx) {
+            this.texts.splice(idx, 1);
+          },
+          onAddLayer() {
+            this.layers.push({
+              name: "",
+              type: "model",
+              model: "",
+              texture: "",
+              show_first_person: true,
+              hide_bones: "",
+              texture_layers: ""
+            });
+          },
+          onRemoveLayer(idx) {
+            this.layers.splice(idx, 1);
+          },
+          onDetectLayers() {
+            const detected = detectLayers();
+            const existing = new Set(this.layers.map((l) => l.name));
+            let added = 0;
+            for (const d of detected) {
+              if (!existing.has(d.name)) {
+                this.layers.push(d);
+                added++;
+              }
+            }
+            Blockbench.showQuickMessage(added > 0 ? `Added ${added} layer(s)` : "No new layers found", 1500);
+          },
+          buildConfig() {
+            return {
+              display_name: this.display_name,
+              animation: this.animation,
+              properties: {
+                first_person: {
+                  show_equipment: this.fp_show_equipment,
+                  model: {
+                    show: this.fp_model_show,
+                    offset: {
+                      x: parseFloat(this.fp_offset_x) || 0,
+                      y: parseFloat(this.fp_offset_y) || 0,
+                      z: parseFloat(this.fp_offset_z) || 0
+                    }
+                  },
+                  custom_arms: {
+                    show: this.fp_arms_show,
+                    custom_render_items: this.fp_arms_render_items,
+                    both_hands: this.fp_arms_both_hands
+                  }
+                },
+                animation_controllers: parseList(this.animation_controllers),
+                fp_animation_controllers: parseList(this.fp_animation_controllers),
+                texts: entriesToTexts(this.texts)
+              },
+              equipment: {
+                head: this.eq_head.trim(),
+                chest: this.eq_chest.trim(),
+                legs: this.eq_legs.trim(),
+                feet: this.eq_feet.trim(),
+                cape: this.eq_cape.trim(),
+                elytra: this.eq_elytra.trim()
+              },
+              layers: entriesToLayers(this.layers)
+            };
+          },
+          onSave() {
+            saveModelConfig(this.buildConfig());
+            Blockbench.showQuickMessage("Model config saved", 1500);
+          },
+          onExport() {
+            const cfg = this.buildConfig();
+            saveModelConfig(cfg);
+            exportModelYaml(cfg);
+          }
+        },
+        template: `
+        <div style="padding: 4px 0 8px; max-height: 550px; overflow-y: auto;">
+
+          <!-- Basic Info -->
+          <div style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+            <div style="font-weight: 600; margin-bottom: 8px; font-size: 13px; color: var(--color-accent);">General</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+              <div>
+                <label style="font-size: 11px; opacity: 0.7; display: block; margin-bottom: 3px;">Display Name</label>
+                <input type="text" class="dark_bordered" v-model="display_name" style="width: 100%; box-sizing: border-box;">
+              </div>
+              <div>
+                <label style="font-size: 11px; opacity: 0.7; display: block; margin-bottom: 3px;">Animation File</label>
+                <input type="text" class="dark_bordered" v-model="animation" placeholder="model.animation.json" style="width: 100%; box-sizing: border-box;">
+              </div>
+            </div>
+          </div>
+
+          <!-- First Person -->
+          <div style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+            <div style="font-weight: 600; margin-bottom: 8px; font-size: 13px; color: var(--color-accent);">First Person</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 8px;">
+              <label style="display: flex; align-items: center; gap: 5px; font-size: 11px;">
+                <input type="checkbox" v-model="fp_show_equipment"> Show Equipment
+              </label>
+              <label style="display: flex; align-items: center; gap: 5px; font-size: 11px;">
+                <input type="checkbox" v-model="fp_model_show"> Show Model
+              </label>
+              <label style="display: flex; align-items: center; gap: 5px; font-size: 11px;">
+                <input type="checkbox" v-model="fp_arms_show"> Show Arms
+              </label>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
+              <label style="display: flex; align-items: center; gap: 5px; font-size: 11px;">
+                <input type="checkbox" v-model="fp_arms_render_items"> Custom Render Items
+              </label>
+              <label style="display: flex; align-items: center; gap: 5px; font-size: 11px;">
+                <input type="checkbox" v-model="fp_arms_both_hands"> Both Hands
+              </label>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;">
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Offset X</label>
+                <input type="number" class="dark_bordered" v-model="fp_offset_x" step="0.1" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Offset Y</label>
+                <input type="number" class="dark_bordered" v-model="fp_offset_y" step="0.1" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Offset Z</label>
+                <input type="number" class="dark_bordered" v-model="fp_offset_z" step="0.1" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+            </div>
+          </div>
+
+          <!-- Animation Controllers -->
+          <div style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+            <div style="font-weight: 600; margin-bottom: 8px; font-size: 13px; color: var(--color-accent);">Animation Controllers</div>
+            <div style="margin-bottom: 6px;">
+              <label style="font-size: 11px; opacity: 0.7; display: block; margin-bottom: 3px;">Controllers (comma separated)</label>
+              <input type="text" class="dark_bordered" v-model="animation_controllers" placeholder="idle, simple_pose, emote, arms" style="width: 100%; box-sizing: border-box;">
+            </div>
+            <div>
+              <label style="font-size: 11px; opacity: 0.7; display: block; margin-bottom: 3px;">FP Controllers (comma separated)</label>
+              <input type="text" class="dark_bordered" v-model="fp_animation_controllers" placeholder="fp_gun" style="width: 100%; box-sizing: border-box;">
+            </div>
+          </div>
+
+          <!-- Texts -->
+          <div style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+              <span style="font-weight: 600; font-size: 13px; color: var(--color-accent);">Texts</span>
+              <button class="material-button" @click="onAddText" style="padding: 2px 8px; font-size: 11px; min-height: 0; line-height: 1.4;">+ Add</button>
+            </div>
+            <div v-if="texts.length === 0" style="font-size: 11px; opacity: 0.4; text-align: center; padding: 4px 0;">No texts configured</div>
+            <div v-for="(entry, idx) in texts" :key="idx" style="display: flex; gap: 4px; align-items: center; margin-bottom: 4px;">
+              <input type="text" class="dark_bordered" v-model="entry.key" placeholder="{placeholder}" style="flex: 1; font-size: 11px; padding: 3px 6px; box-sizing: border-box;">
+              <span style="opacity: 0.4; font-size: 11px;">:</span>
+              <input type="text" class="dark_bordered" v-model="entry.value" placeholder="value or %placeholder%" style="flex: 1.5; font-size: 11px; padding: 3px 6px; box-sizing: border-box;">
+              <button class="material-button" @click="onRemoveText(idx)" style="padding: 2px 6px; font-size: 11px; min-height: 0; line-height: 1.4; color: var(--color-close);">\u2715</button>
+            </div>
+          </div>
+
+          <!-- Equipment -->
+          <div style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+            <div style="font-weight: 600; margin-bottom: 8px; font-size: 13px; color: var(--color-accent);">Equipment</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Head</label>
+                <input type="text" class="dark_bordered" v-model="eq_head" placeholder="equipment/head.geo.json" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Chest</label>
+                <input type="text" class="dark_bordered" v-model="eq_chest" placeholder="equipment/chest.geo.json" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Legs</label>
+                <input type="text" class="dark_bordered" v-model="eq_legs" placeholder="equipment/legs.geo.json" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Feet</label>
+                <input type="text" class="dark_bordered" v-model="eq_feet" placeholder="equipment/feet.geo.json" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Cape</label>
+                <input type="text" class="dark_bordered" v-model="eq_cape" placeholder="equipment/cape.geo.json" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+              <div>
+                <label style="font-size: 10px; opacity: 0.6; display: block; margin-bottom: 2px;">Elytra</label>
+                <input type="text" class="dark_bordered" v-model="eq_elytra" placeholder="equipment/elytra.geo.json" style="width: 100%; box-sizing: border-box; font-size: 11px;">
+              </div>
+            </div>
+          </div>
+
+          <!-- Layers -->
+          <div style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+              <span style="font-weight: 600; font-size: 13px; color: var(--color-accent);">Layers</span>
+              <div style="display: flex; gap: 4px;">
+                <button class="material-button" @click="onDetectLayers" style="padding: 2px 8px; font-size: 11px; min-height: 0; line-height: 1.4;">Detect</button>
+                <button class="material-button" @click="onAddLayer" style="padding: 2px 8px; font-size: 11px; min-height: 0; line-height: 1.4;">+ Add</button>
+              </div>
+            </div>
+
+            <div v-if="layers.length === 0" style="font-size: 11px; opacity: 0.4; text-align: center; padding: 4px 0;">No layers configured</div>
+
+            <div v-for="(layer, idx) in layers" :key="idx"
+              style="border: 1px solid rgba(255,255,255,0.07); border-radius: 5px; padding: 8px; margin-bottom: 6px;">
+              <div style="display: flex; gap: 4px; align-items: center; margin-bottom: 6px;">
+                <input type="text" class="dark_bordered" v-model="layer.name" placeholder="layer_name" style="flex: 1; font-size: 11px; padding: 3px 6px; box-sizing: border-box;">
+                <select class="dark_bordered" v-model="layer.type" style="font-size: 11px; padding: 3px 4px;">
+                  <option value="model">model</option>
+                  <option value="texture">texture</option>
+                </select>
+                <label style="display: flex; align-items: center; gap: 3px; font-size: 10px; white-space: nowrap;">
+                  <input type="checkbox" v-model="layer.show_first_person"> FP
+                </label>
+                <button class="material-button" @click="onRemoveLayer(idx)" style="padding: 2px 6px; font-size: 11px; min-height: 0; line-height: 1.4; color: var(--color-close);">\u2715</button>
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
+                <div v-if="layer.type === 'model'">
+                  <input type="text" class="dark_bordered" v-model="layer.model" placeholder="model name" style="width: 100%; box-sizing: border-box; font-size: 10px; padding: 2px 5px;">
+                </div>
+                <div v-if="layer.type === 'texture'">
+                  <input type="text" class="dark_bordered" v-model="layer.texture" placeholder="texture.png" style="width: 100%; box-sizing: border-box; font-size: 10px; padding: 2px 5px;">
+                </div>
+                <div>
+                  <input type="text" class="dark_bordered" v-model="layer.hide_bones" placeholder="hide_bones (comma sep)" style="width: 100%; box-sizing: border-box; font-size: 10px; padding: 2px 5px;">
+                </div>
+                <div>
+                  <input type="text" class="dark_bordered" v-model="layer.texture_layers" placeholder="texture_layers (comma sep)" style="width: 100%; box-sizing: border-box; font-size: 10px; padding: 2px 5px;">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div style="display: flex; gap: 8px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;">
+            <button class="material-button" @click="onSave" style="flex: 1;">Save</button>
+            <button class="material-button" @click="onExport" style="flex: 1;">Export .yml</button>
+          </div>
+        </div>
+      `
+      },
+      onConfirm() {
+        try {
+          const vue = dialog.content_vue || dialog.component;
+          if (vue && typeof vue.buildConfig === "function") {
+            const cfg = vue.buildConfig();
+            saveModelConfig(cfg);
+            debugLog("[ModelConfig] Saved on confirm");
+          }
+        } catch (e) {
+          console.error("[ModelConfig] Error saving on confirm:", e);
+        }
+      },
+      onCancel() {
+        dialog.hide().delete();
+      }
+    });
+    dialog.show();
+  }
+
+  // src/model-config/index.ts
+  var modelConfigAction = null;
+  function registerModelConfig() {
+    modelConfigAction = new Action("animorph_model_config", {
+      name: "Model Config (.yml)",
+      icon: "description",
+      description: "Configure and export model .yml config file",
+      click() {
+        openModelConfigDialog();
+      }
+    });
+    MenuBar.addAction(modelConfigAction, "file.export");
+    debugLog("[ModelConfig] Registered");
+  }
+  function unregisterModelConfig() {
+    if (modelConfigAction) {
+      modelConfigAction.delete();
+      modelConfigAction = null;
+    }
+    debugLog("[ModelConfig] Unregistered");
   }
 
   // src/first-person/index.ts
@@ -6157,6 +6862,7 @@
     registerLayerActions();
     registerTextureLayerActions();
     registerEmoteConfig();
+    registerModelConfig();
     initializeSync();
     registerFirstPerson();
     debugLog(`\u2713 ${PLUGIN_NAME} v${PLUGIN_VERSION} loaded`);
@@ -6183,6 +6889,7 @@
     unregisterLayerActions();
     unregisterTextureLayerActions();
     unregisterEmoteConfig();
+    unregisterModelConfig();
     cleanupSync();
     unregisterFirstPerson();
     debugLog(`\u2713 ${PLUGIN_NAME} unloaded`);
@@ -6190,11 +6897,12 @@
   Plugin.register(PLUGIN_ID, {
     title: PLUGIN_NAME,
     author: "feeldev",
-    icon: "pets",
-    description: "Animorph tools: loop_start support, mesh export, text display, and reference layers for Bedrock/GeckoLib",
+    icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CiAgPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzRhZGU4MCIvPgogIDx0ZXh0IHg9IjE2IiB5PSIyMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXdlaWdodD0iODAwIiBmb250LXNpemU9IjIyIiBmaWxsPSIjMGYxMjE5Ij5BPC90ZXh0Pgo8L3N2Zz4K",
+    description: "Animorph's Blockbench plugin \u2014 build, sync and preview your mod assets in real time.",
+    about: "## Animorph Tools\n\nA toolkit for Minecraft Bedrock & GeckoLib mod development.\n\n### Features\n\n**Loop Start** \u2014 Add GeckoLib's `loop_start` property directly from the animation properties dialog, with a visual marker in the timeline.\n\n**Poly Mesh** \u2014 Export and import meshes as `poly_mesh` for Bedrock geometry files.\n\n**Text Display** \u2014 Create 3D text elements rendered as in-world cubes, with full font and style control.\n\n**Reference Layers** \u2014 Load reference models as overlay layers to compare against your current model.\n\n**Texture Layers** \u2014 Manage and preview texture layers inside Blockbench.\n\n**Emote Config** \u2014 Configure and export emote definitions to YAML for use in your mod.\n\n**Model Config** \u2014 Per-model configuration with YAML export for Bedrock/GeckoLib entity definitions.\n\n**Remote Sync** \u2014 Live WebSocket sync with a running Fabric mod. Push animations and model data directly into Minecraft without reloading.\n\n**First Person View** \u2014 Preview your model from a first-person camera perspective inside Blockbench.\n\n### Links\n\n[Wiki & Documentation](https://animorph.crewved.com/) \u2014 [Discord](https://discord.com/invite/uHMY5hxeK4)",
     version: PLUGIN_VERSION,
     variant: "both",
-    tags: ["Minecraft: Bedrock Edition", "GeckoLib", "Animations", "Mesh", "Text Display", "Layers"],
+    tags: ["Minecraft: Bedrock Edition", "GeckoLib", "Animations", "Mesh", "Text Display", "Layers", "Emote", "Remote Sync"],
     onload: onLoad,
     onunload: onUnload
   });
