@@ -11,7 +11,7 @@
   // src/core/constants.ts
   var PLUGIN_ID = "animorph-tools";
   var PLUGIN_NAME = "Animorph Tools";
-  var PLUGIN_VERSION = "1.0.1";
+  var PLUGIN_VERSION = "1.1.0-beta";
   var PROPERTY_NAME = "loop_start";
   var PROPERTY_DEFAULT = 0;
   var MARKER_ID = "timeline_loop_start_marker";
@@ -19,6 +19,198 @@
   var MARKER_COLOR = "var(--color-accent)";
   var SETTING_NORMALIZED_UVS = "animorph_normalized_mesh_uvs";
   var SETTING_SKIP_NORMALS = "animorph_skip_mesh_normals";
+
+  // src/changelog-injector/index.ts
+  var CHANGELOG_URL = "https://raw.githubusercontent.com/feeldev12/animorph-blockbench/main/changelog.json";
+  var CONTAINER_ID = "at_changelog_panel";
+  var CACHE_KEY = "animorph_changelog_cache";
+  var CACHE_HASH_KEY = "animorph_changelog_cache_hash";
+  function hashStr(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash |= 0;
+    }
+    return hash.toString(36);
+  }
+  function buildChangelogHTML(data) {
+    let html = "";
+    for (const [version, entry] of Object.entries(data)) {
+      html += `<div style="margin-bottom:20px;">`;
+      html += `<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px;">`;
+      html += `<h3 style="margin:0;font-size:1.2em;">${version}</h3>`;
+      html += `<span style="color:#888;font-style:italic;font-size:0.9em;">by ${entry.author}</span>`;
+      if (entry.date) {
+        html += `<span style="color:#666;font-size:0.85em;">${entry.date}</span>`;
+      }
+      html += `</div>`;
+      for (const category of entry.categories) {
+        html += `<div style="margin-bottom:12px;">`;
+        html += `<h4 style="margin:4px 0;color:#aaa;font-size:1em;font-weight:600;">${category.title}</h4>`;
+        html += `<ul style="margin:4px 0 8px 20px;">`;
+        for (const item of category.list) {
+          html += `<li style="margin-bottom:3px;line-height:1.4;">${item}</li>`;
+        }
+        html += `</ul>`;
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+    return html;
+  }
+  function isOnOurPluginPage() {
+    const titleEl = document.querySelector("#plugin_browser_page h1");
+    if (!titleEl)
+      return false;
+    return titleEl.textContent?.includes("Animorph Tools") ?? false;
+  }
+  function isChangelogTabSelected() {
+    const tabBar = document.getElementById("plugin_browser_page_tab_bar");
+    if (!tabBar)
+      return false;
+    const tabs = tabBar.querySelectorAll("li");
+    for (const tab of tabs) {
+      if (tab.classList.contains("selected")) {
+        return tab.textContent?.trim() === "Changelog";
+      }
+    }
+    return false;
+  }
+  function getCachedChangelog() {
+    try {
+      return localStorage.getItem(CACHE_KEY);
+    } catch {
+      return null;
+    }
+  }
+  function saveCachedChangelog(jsonStr) {
+    try {
+      localStorage.setItem(CACHE_KEY, jsonStr);
+      localStorage.setItem(CACHE_HASH_KEY, hashStr(jsonStr));
+      debugLog("\u2713 Changelog cached in localStorage");
+    } catch {
+      debugLog("\u26A0 Failed to cache changelog in localStorage");
+    }
+  }
+  function getCachedHash() {
+    try {
+      return localStorage.getItem(CACHE_HASH_KEY);
+    } catch {
+      return null;
+    }
+  }
+  async function fetchChangelog() {
+    try {
+      const res = await fetch(CHANGELOG_URL);
+      if (res.ok) {
+        const text = await res.text();
+        debugLog("\u2713 Changelog fetched from GitHub");
+        return text;
+      }
+      debugLog("\u26A0 GitHub fetch failed (status " + res.status + ")");
+    } catch (e) {
+      debugLog("\u26A0 Fetch failed");
+    }
+    return null;
+  }
+  async function resolveChangelog() {
+    const remote = await fetchChangelog();
+    if (remote) {
+      const remoteHash = hashStr(remote);
+      const cachedHash = getCachedHash();
+      if (remoteHash !== cachedHash) {
+        saveCachedChangelog(remote);
+        debugLog("\u2713 Changelog updated from GitHub");
+        return { data: JSON.parse(remote), source: "remote" };
+      }
+      return { data: JSON.parse(remote), source: "remote" };
+    }
+    const cached = getCachedChangelog();
+    if (cached) {
+      debugLog("\u2713 Using cached changelog (fetch failed)");
+      return { data: JSON.parse(cached), source: "cache" };
+    }
+    debugLog("\u26A0 No changelog available (no GitHub, no cache)");
+    return null;
+  }
+  function getOrCreateContainer() {
+    let container = document.getElementById(CONTAINER_ID);
+    if (container)
+      return container;
+    const nativeUl = document.getElementById("plugin_browser_changelog");
+    if (!nativeUl || !nativeUl.parentElement)
+      return null;
+    container = document.createElement("div");
+    container.id = CONTAINER_ID;
+    container.style.display = "none";
+    container.style.padding = "12px 16px";
+    container.style.overflowY = "auto";
+    nativeUl.parentElement.insertBefore(container, nativeUl.nextSibling);
+    return container;
+  }
+  function updateVisibility() {
+    const container = document.getElementById(CONTAINER_ID);
+    if (!container)
+      return;
+    if (isOnOurPluginPage() && isChangelogTabSelected()) {
+      container.style.display = "block";
+    } else {
+      container.style.display = "none";
+    }
+  }
+  async function refreshChangelog() {
+    const container = getOrCreateContainer();
+    if (!container)
+      return;
+    const result = await resolveChangelog();
+    if (result) {
+      const { data, source } = result;
+      container.innerHTML = buildChangelogHTML(data);
+      debugLog(`\u2713 Changelog rendered (source: ${source})`);
+    } else {
+      container.innerHTML = `
+      <div style="color:#888;text-align:center;padding:40px 20px;">
+        <i class="material-icons icon" style="font-size:48px;opacity:0.3;">update_disabled</i>
+        <p style="margin-top:12px;font-size:1.1em;">No changelog available</p>
+        <p style="font-size:0.85em;color:#666;">Connect to the internet to fetch changelog data.</p>
+      </div>`;
+      debugLog("\u26A0 No changelog to display");
+    }
+  }
+  function onTabBarClick(_e) {
+    setTimeout(() => {
+      if (isOnOurPluginPage() && isChangelogTabSelected()) {
+        refreshChangelog();
+      }
+      updateVisibility();
+    }, 150);
+  }
+  function startChangelogInjector() {
+    setTimeout(() => {
+      const tabBar = document.getElementById("plugin_browser_page_tab_bar");
+      if (tabBar) {
+        tabBar.addEventListener("click", onTabBarClick);
+        debugLog("\u2713 Changelog injector: tab click listener attached");
+      }
+      if (isOnOurPluginPage() && isChangelogTabSelected()) {
+        setTimeout(async () => {
+          await refreshChangelog();
+          updateVisibility();
+        }, 500);
+      }
+    }, 700);
+  }
+  function stopChangelogInjector() {
+    const tabBar = document.getElementById("plugin_browser_page_tab_bar");
+    if (tabBar) {
+      tabBar.removeEventListener("click", onTabBarClick);
+    }
+    const container = document.getElementById(CONTAINER_ID);
+    if (container)
+      container.remove();
+    debugLog("\u2713 Changelog injector stopped");
+  }
 
   // src/ui/styles.ts
   var styleElement = null;
@@ -1705,8 +1897,13 @@
   var deleteHandler = null;
   var toggleVisibilityAction = null;
   var exportLayerAnimAction = null;
+  var exportLayerModelAction = null;
+  var saveLayerToFileAction = null;
+  var reloadMainModelAction = null;
   var layerSaveObserver = null;
   var ctrlSHandler = null;
+  var currentProjectPath = null;
+  var selectProjectHandler = null;
   var compileFilterHandlers = [];
   var animCompileFilterHandler = null;
   var layerAnimBuffer = /* @__PURE__ */ new Map();
@@ -2407,7 +2604,35 @@
     if (!isApp)
       return;
     const fs = requireNativeModule("fs");
+    let sourceContent = null;
     try {
+      sourceContent = fs.readFileSync(collection.export_path, "utf-8");
+    } catch (_) {
+      debugLog(`[Layers] Source file not readable for "${collection.name}", falling back to in-memory restore`);
+    }
+    if (!sourceContent) {
+      enableMultiTextures();
+      if (!collection.layer_elements || collection.layer_elements.length === 0) {
+        collection.layer_elements = [...collection.children || []];
+      }
+      const layerTexture = findLayerTexture(collection);
+      if (layerTexture) {
+        collection.texture = layerTexture.uuid;
+        for (const uuid of collection.layer_elements) {
+          const cube = Cube.all.find((c) => c.uuid === uuid);
+          if (cube)
+            applyTextureToLayerCube(cube, layerTexture);
+        }
+        reapplyMainTexture();
+        Canvas.updateAll();
+        Blockbench.showQuickMessage(`Layer restored: ${collection.name}`);
+      } else {
+        Blockbench.showQuickMessage(`Layer embedded \u2014 no external file to reload: ${collection.name}`, 2e3);
+      }
+      return;
+    }
+    try {
+      const json = JSON.parse(sourceContent);
       let wasVisible = true;
       if (preserveVisibility) {
         const elementUuids = collection.layer_elements || [];
@@ -2420,8 +2645,6 @@
         }
       }
       deleteLayerElements(collection);
-      const content = fs.readFileSync(collection.export_path, "utf-8");
-      const json = JSON.parse(content);
       const { groups, cubes, allElements, rootGroups, textures, uvWidth, uvHeight } = parseModelFile(json, collection.name, collection.export_path);
       const { newRootGroups } = attachToExistingHierarchy(rootGroups, allElements, groups, collection.name);
       collection.children = allElements.map((e) => e.uuid);
@@ -2602,6 +2825,204 @@
       }]
     };
   }
+  function serializeLayerToBBModel(collection) {
+    const layerName = collection.name;
+    const prefix = layerName + LAYER_SEPARATOR2;
+    const uvWidth = collection.layer_uv_width || 64;
+    const uvHeight = collection.layer_uv_height || 64;
+    function stripPrefix(name) {
+      return name.startsWith(prefix) ? name.substring(prefix.length) : name;
+    }
+    if (collection.export_path && isApp) {
+      try {
+        let extractOutliner2 = function(nodes) {
+          const out = [];
+          for (const node of nodes) {
+            if (typeof node === "string") {
+              if (layerCubeUuids.has(node))
+                out.push(node);
+            } else if (node && typeof node === "object") {
+              if (node.name?.startsWith(prefix)) {
+                out.push({ ...node, name: stripPrefix(node.name), children: extractOutliner2(node.children || []) });
+              } else {
+                out.push(...extractOutliner2(node.children || []));
+              }
+            }
+          }
+          return out;
+        };
+        var extractOutliner = extractOutliner2;
+        const fs = requireNativeModule("fs");
+        const srcJson = JSON.parse(fs.readFileSync(collection.export_path, "utf-8"));
+        const isProjectFile = (srcJson.collections || []).some(
+          (c) => c.export_codec === "animorph_layer"
+        );
+        if (!isProjectFile) {
+          return srcJson;
+        }
+        const elementUuids2 = new Set(collection.layer_elements || []);
+        const layerCubeUuids = new Set(
+          Cube.all.filter((c) => elementUuids2.has(c.uuid)).map((c) => c.uuid)
+        );
+        const elements2 = (srcJson.elements || []).filter((e) => layerCubeUuids.has(e.uuid)).map((e) => ({ ...e, name: stripPrefix(e.name) }));
+        const outliner2 = extractOutliner2(srcJson.outliner || []);
+        return {
+          meta: srcJson.meta || { format_version: "4.10", model_format: "bedrock", box_uv: false },
+          name: layerName,
+          geometry_name: srcJson.geometry_name || "",
+          visible_box: srcJson.visible_box || [1, 1, 0],
+          variable_placeholders: srcJson.variable_placeholders || "",
+          resolution: { width: uvWidth, height: uvHeight },
+          elements: elements2,
+          outliner: outliner2,
+          textures: srcJson.textures || [],
+          animations: []
+        };
+      } catch (_) {
+      }
+    }
+    const elementUuids = new Set(collection.layer_elements || []);
+    const cubeUvMap = collection.layer_cube_uv_map || {};
+    const layerCubes = Cube.all.filter((c) => elementUuids.has(c.uuid));
+    const layerGroupSet = new Set(
+      Group.all.filter((g) => elementUuids.has(g.uuid) && g.name.startsWith(prefix))
+    );
+    const scaleX = uvWidth / (Project?.texture_width || 64);
+    const scaleY = uvHeight / (Project?.texture_height || 64);
+    const faceNames = ["north", "east", "south", "west", "up", "down"];
+    const elements = layerCubes.map((cube) => {
+      const storedUv = cubeUvMap[cube.uuid];
+      const originalUv = cube.layer_original_uv ?? storedUv?.uv;
+      const isPerFace = cube.layer_per_face_uv ?? storedUv?.perFace ?? false;
+      const faces = {};
+      if (isPerFace && originalUv && !Array.isArray(originalUv)) {
+        for (const fn of faceNames) {
+          const o = originalUv[fn];
+          if (o)
+            faces[fn] = { uv: [o.uv[0], o.uv[1], o.uv[0] + (o.uv_size?.[0] ?? 0), o.uv[1] + (o.uv_size?.[1] ?? 0)], texture: 0, rotation: 0 };
+        }
+      } else {
+        for (const fn of faceNames) {
+          const f = cube.faces?.[fn];
+          if (f) {
+            const uv = f.uv ? [f.uv[0] * scaleX, f.uv[1] * scaleY, f.uv[2] * scaleX, f.uv[3] * scaleY] : [0, 0, uvWidth, uvHeight];
+            faces[fn] = { uv, texture: 0, rotation: f.rotation || 0 };
+          }
+        }
+      }
+      return {
+        name: stripPrefix(cube.name),
+        box_uv: false,
+        rescale: false,
+        locked: false,
+        from: [...cube.from],
+        to: [...cube.to],
+        autouv: 0,
+        color: cube.color ?? 0,
+        inflate: cube.inflate || 0,
+        origin: [...cube.origin],
+        rotation: [...cube.rotation || [0, 0, 0]],
+        faces,
+        uuid: cube.uuid
+      };
+    });
+    const nodeMap = /* @__PURE__ */ new Map();
+    for (const g of layerGroupSet) {
+      nodeMap.set(g, { name: stripPrefix(g.name), origin: [...g.origin], rotation: [...g.rotation || [0, 0, 0]], uuid: g.uuid, export: true, isOpen: true, locked: false, visibility: true, autouv: 0, children: [] });
+    }
+    for (const g of layerGroupSet) {
+      const node = nodeMap.get(g);
+      for (const child of layerGroupSet) {
+        if (child.parent === g)
+          node.children.push(nodeMap.get(child));
+      }
+      for (const cube of layerCubes) {
+        if (cube.parent === g)
+          node.children.push(cube.uuid);
+      }
+    }
+    const outliner = [...layerGroupSet].filter((g) => !layerGroupSet.has(g.parent)).map((g) => nodeMap.get(g));
+    for (const cube of layerCubes) {
+      if (!layerGroupSet.has(cube.parent))
+        outliner.push(cube.uuid);
+    }
+    const textures = [];
+    const tg = TextureGroup.all.find((t) => t.name === layerName);
+    if (tg) {
+      for (const tex of Texture.all.filter((t) => t.group === tg.uuid)) {
+        textures.push({ path: tex.path || "", name: tex.name || "texture", folder: "", namespace: "", id: String(textures.length), render_mode: "default", render_sides: "auto", frame_time: 1, frame_linear_interpolation: false, visible: true, width: uvWidth, height: uvHeight, uv_width: uvWidth, uv_height: uvHeight, source: tex.source || "" });
+      }
+    }
+    return {
+      meta: { format_version: "4.10", model_format: "bedrock", box_uv: false },
+      name: layerName,
+      geometry_name: "",
+      visible_box: [1, 1, 0],
+      variable_placeholders: "",
+      resolution: { width: uvWidth, height: uvHeight },
+      elements,
+      outliner,
+      textures,
+      animations: []
+    };
+  }
+  function exportLayerModel(collection) {
+    if (!collection || collection.export_codec !== "animorph_layer")
+      return;
+    if (!isApp) {
+      Blockbench.showQuickMessage("Export Layer is only available in the desktop app", 2e3);
+      return;
+    }
+    const srcPath = collection.export_path;
+    const exportAsBBModel = !srcPath || isBBModelLayer(srcPath);
+    if (exportAsBBModel) {
+      let bbmodel;
+      try {
+        bbmodel = serializeLayerToBBModel(collection);
+      } catch (e) {
+        console.error("[Layers] Error serializing layer as bbmodel:", e);
+        Blockbench.showQuickMessage("Error exporting layer model", 2e3);
+        return;
+      }
+      Blockbench.export({
+        type: "Blockbench Model",
+        extensions: ["bbmodel"],
+        name: collection.name + ".bbmodel",
+        content: JSON.stringify(bbmodel, null, 2),
+        savetype: "text"
+      }, (path) => {
+        const savedPath = path?.path || path;
+        if (savedPath) {
+          collection.export_path = savedPath;
+          Blockbench.showQuickMessage(`Exported layer: ${collection.name}`);
+          debugLog(`[Layers] Exported layer as bbmodel to: ${savedPath}`);
+        }
+      });
+    } else {
+      let json;
+      try {
+        json = serializeLayerToBedrock(collection);
+      } catch (e) {
+        console.error("[Layers] Error serializing layer as geo.json:", e);
+        Blockbench.showQuickMessage("Error exporting layer model", 2e3);
+        return;
+      }
+      Blockbench.export({
+        type: "Bedrock Geometry",
+        extensions: ["geo.json", "json"],
+        name: collection.name + ".geo.json",
+        content: JSON.stringify(json, null, 2),
+        savetype: "text"
+      }, (path) => {
+        const savedPath = path?.path || path;
+        if (savedPath) {
+          collection.export_path = savedPath;
+          Blockbench.showQuickMessage(`Exported layer: ${collection.name}`);
+          debugLog(`[Layers] Exported layer as geo.json to: ${savedPath}`);
+        }
+      });
+    }
+  }
   function saveLayer(collection) {
     if (!collection || collection.export_codec !== "animorph_layer")
       return;
@@ -2611,13 +3032,200 @@
     }
     const filePath = collection.export_path;
     if (!filePath) {
-      Blockbench.showQuickMessage("No source file path for this layer", 2e3);
+      exportLayerModel(collection);
       return;
     }
     const fs = requireNativeModule("fs");
     if (isBBModelLayer(filePath)) {
       try {
+        let stripPrefix2 = function(name) {
+          return name.startsWith(prefix) ? name.substring(prefix.length) : name;
+        }, buildGroupNode2 = function(group) {
+          const children = [];
+          for (const childUuid of group.children || []) {
+            if (allElementUuids.has(childUuid)) {
+              children.push(childUuid);
+            } else if (allGroupUuids.has(childUuid)) {
+              const sub = bbmodelContent.groups.find((g) => g.uuid === childUuid);
+              if (sub)
+                children.push(buildGroupNode2(sub));
+            }
+          }
+          return { ...group, children };
+        };
+        var stripPrefix = stripPrefix2, buildGroupNode = buildGroupNode2;
+        if (!fs.existsSync(filePath)) {
+          debugLog(`[Layers] File no longer exists: ${filePath}`);
+          Blockbench.showQuickMessage("File no longer exists. Please use 'Export Layer Model' to save to a new location", 3e3);
+          exportLayerModel(collection);
+          return;
+        }
         const bbmodelContent = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        debugLog(`[Layers] Saving layer "${collection.name}" to bbmodel: ${filePath}`);
+        debugLog(`[Layers] Layer elements to save: ${collection.layer_elements?.length || 0} elements`);
+        const layerElementUuids = new Set(collection.layer_elements || []);
+        const prefix = collection.name + LAYER_SEPARATOR2;
+        let elements = Cube.all.filter((c) => layerElementUuids.has(c.uuid)).map((cube) => {
+          const faceNames = ["north", "east", "south", "west", "up", "down"];
+          const faces = {};
+          for (const fn of faceNames) {
+            const f = cube.faces?.[fn];
+            if (f) {
+              faces[fn] = {
+                uv: f.uv ? [...f.uv] : [0, 0, 64, 64],
+                texture: f.texture,
+                rotation: f.rotation || 0
+              };
+            }
+          }
+          return {
+            uuid: cube.uuid,
+            name: stripPrefix2(cube.name),
+            box_uv: false,
+            render_order: "default",
+            locked: cube.locked ?? false,
+            export: cube.export ?? true,
+            scope: cube.scope ?? 0,
+            allow_mirror_modeling: true,
+            is_text_display: cube.is_text_display ?? false,
+            text_content: cube.text_content ?? "Text",
+            text_color: cube.text_color ?? "#ffffff",
+            text_background: cube.text_background ?? "#000000",
+            text_background_enabled: cube.text_background_enabled ?? true,
+            text_alignment: cube.text_alignment ?? "center",
+            text_padding: cube.text_padding ?? 16,
+            from: [...cube.from],
+            to: [...cube.to],
+            autouv: cube.autouv ?? 0,
+            color: cube.color ?? 0,
+            origin: [...cube.origin || [0, 0, 0]],
+            faces
+          };
+        });
+        const missingUuids = [...layerElementUuids].filter(
+          (uuid) => !elements.some((e) => e.uuid === uuid)
+        );
+        if (missingUuids.length > 0) {
+          debugLog(`[Layers] ${missingUuids.length} layer elements missing from Cube.all, retrieving from bbmodel file`);
+          const bbmodelLayerElements = (bbmodelContent.elements || []).filter(
+            (e) => missingUuids.includes(e.uuid)
+          );
+          elements = [...elements, ...bbmodelLayerElements];
+        }
+        debugLog(`[Layers] Serialized ${elements.length} elements from current state`);
+        const otherElements = (bbmodelContent.elements || []).filter(
+          (e) => !layerElementUuids.has(e.uuid)
+        );
+        bbmodelContent.elements = [...otherElements, ...elements];
+        debugLog(`[Layers] Merged elements: ${otherElements.length} other + ${elements.length} layer = ${bbmodelContent.elements.length} total`);
+        const layerGroupUuids = new Set(
+          Group.all.filter((g) => g.name.startsWith(prefix)).map((g) => g.uuid)
+        );
+        const originalLayerGroups = (bbmodelContent.groups || []).filter(
+          (g) => layerGroupUuids.has(g.uuid) || g.name.startsWith(prefix)
+        );
+        debugLog(`[Layers] Found ${originalLayerGroups.length} original layer groups in bbmodel`);
+        const updatedGroups = originalLayerGroups.map((origGroup) => {
+          const liveGroup = Group.all.find((g) => g.uuid === origGroup.uuid);
+          if (liveGroup) {
+            const liveChildren = (liveGroup.children || []).map((c) => typeof c === "string" ? c : c.uuid);
+            const children = liveChildren.length > 0 ? liveChildren : origGroup.children || [];
+            return {
+              ...origGroup,
+              name: liveGroup.name.startsWith(prefix) ? stripPrefix2(liveGroup.name) : origGroup.name,
+              origin: [...liveGroup.origin || origGroup.origin || [0, 0, 0]],
+              rotation: [...liveGroup.rotation || origGroup.rotation || [0, 0, 0]],
+              color: liveGroup.color ?? origGroup.color ?? 0,
+              children,
+              export: liveGroup.export ?? origGroup.export ?? true,
+              locked: liveGroup.locked ?? origGroup.locked ?? false,
+              visibility: liveGroup.visibility ?? origGroup.visibility ?? true,
+              isOpen: liveGroup.isOpen ?? origGroup.isOpen ?? true,
+              shade: liveGroup.shade ?? origGroup.shade ?? true
+            };
+          }
+          return origGroup;
+        });
+        const existingGroupUuids = new Set(updatedGroups.map((g) => g.uuid));
+        const newGroups = Group.all.filter((g) => g.name.startsWith(prefix) && !existingGroupUuids.has(g.uuid)).map((group) => ({
+          name: stripPrefix2(group.name),
+          uuid: group.uuid,
+          export: group.export ?? true,
+          locked: group.locked ?? false,
+          scope: group.scope ?? 0,
+          selected: group.selected ?? false,
+          _static: group._static || { properties: {}, temp_data: {} },
+          origin: [...group.origin || [0, 0, 0]],
+          rotation: [...group.rotation || [0, 0, 0]],
+          color: group.color ?? 0,
+          children: (group.children || []).map((c) => c.uuid),
+          reset: group.reset ?? false,
+          shade: group.shade ?? true,
+          mirror_uv: group.mirror_uv ?? false,
+          visibility: group.visibility ?? true,
+          autouv: group.autouv ?? 0,
+          isOpen: group.isOpen ?? true,
+          primary_selected: group.primary_selected ?? false
+        }));
+        const allLayerGroups = [...updatedGroups, ...newGroups];
+        debugLog(`[Layers] Serialized ${allLayerGroups.length} groups (${updatedGroups.length} existing + ${newGroups.length} new)`);
+        for (const g of allLayerGroups) {
+          debugLog(`[Layers] Group "${g.name}" (${g.uuid}) children:`, JSON.stringify(g.children));
+        }
+        debugLog(`[Layers] collection.layer_elements:`, JSON.stringify(collection.layer_elements));
+        const originalGroups = bbmodelContent.groups || [];
+        const mergedGroups = originalGroups.map((origGroup) => {
+          const isLayerGroup = layerGroupUuids.has(origGroup.uuid) || origGroup.name?.startsWith(prefix);
+          if (isLayerGroup) {
+            const updated = allLayerGroups.find((g) => g.uuid === origGroup.uuid);
+            return updated || origGroup;
+          }
+          return origGroup;
+        });
+        const mergedUuids = new Set(mergedGroups.map((g) => g.uuid));
+        for (const layerGroup of allLayerGroups) {
+          if (!mergedUuids.has(layerGroup.uuid)) {
+            mergedGroups.push(layerGroup);
+          }
+        }
+        bbmodelContent.groups = mergedGroups;
+        debugLog(`[Layers] Merged groups: ${mergedGroups.length} total`);
+        const allGroupUuids = new Set(bbmodelContent.groups.map((g) => g.uuid));
+        const allElementUuids = new Set(bbmodelContent.elements.map((e) => e.uuid));
+        const childGroupUuids = /* @__PURE__ */ new Set();
+        for (const g of bbmodelContent.groups) {
+          for (const c of g.children || []) {
+            if (allGroupUuids.has(c))
+              childGroupUuids.add(c);
+          }
+        }
+        const rootGroups = bbmodelContent.groups.filter((g) => !childGroupUuids.has(g.uuid));
+        const outliner = rootGroups.map(buildGroupNode2);
+        const inGroup = /* @__PURE__ */ new Set();
+        for (const g of bbmodelContent.groups) {
+          for (const c of g.children || []) {
+            if (allElementUuids.has(c))
+              inGroup.add(c);
+          }
+        }
+        const rootElements = bbmodelContent.elements.filter((e) => !inGroup.has(e.uuid)).map((e) => e.uuid);
+        bbmodelContent.outliner = [...outliner, ...rootElements];
+        debugLog(`[Layers] Outliner: ${outliner.length} root groups, ${rootElements.length} root elements`);
+        const textures = Texture.all.filter((t) => collection.texture === t.uuid || t.group && t.group === collection.name).map((tex) => ({
+          uuid: tex.uuid,
+          name: tex.name,
+          path: tex.path || "",
+          mode: tex.mode || "bitmap",
+          source: tex.source
+        }));
+        if (textures.length > 0) {
+          const layerTextureUuids = new Set(textures.map((t) => t.uuid));
+          const otherTextures = (bbmodelContent.textures || []).filter(
+            (t) => !layerTextureUuids.has(t.uuid)
+          );
+          bbmodelContent.textures = [...otherTextures, ...textures];
+          debugLog(`[Layers] Updated ${textures.length} textures`);
+        }
         const animJson = serializeLayerAnimations(collection);
         if (animJson && Object.keys(animJson.animations).length > 0) {
           if (!bbmodelContent.animations) {
@@ -2676,9 +3284,11 @@
         }
         fs.writeFileSync(filePath, JSON.stringify(bbmodelContent, null, 2), "utf-8");
         Blockbench.showQuickMessage(`Saved layer: ${collection.name}`);
+        debugLog(`[Layers] \u2713 Successfully saved layer "${collection.name}" to: ${filePath}`);
       } catch (e) {
         console.error("[Layers] Error saving bbmodel layer:", e);
         Blockbench.showQuickMessage(`Error saving layer: ${collection.name}`, 2e3);
+        exportLayerModel(collection);
       }
     } else {
       try {
@@ -2689,6 +3299,163 @@
         console.error("[Layers] Error saving layer:", e);
         Blockbench.showQuickMessage(`Error saving layer: ${collection.name}`, 2e3);
       }
+    }
+  }
+  function saveLayerToFile(collection) {
+    if (!collection || collection.export_codec !== "animorph_layer")
+      return;
+    if (!isApp) {
+      Blockbench.showQuickMessage("Save Layer to File is only available in the desktop app", 2e3);
+      return;
+    }
+    let filePath = collection.export_path;
+    if (!filePath) {
+      Blockbench.showQuickMessage("Please select the .bbmodel file to save to", 2e3);
+      Blockbench.export({
+        type: "Blockbench Model",
+        extensions: ["bbmodel"],
+        name: collection.name + ".bbmodel",
+        content: "",
+        savetype: "text"
+      }, (path) => {
+        const savedPath = path?.path || path;
+        if (savedPath) {
+          collection.export_path = savedPath;
+          saveLayerToFile(collection);
+        }
+      });
+      return;
+    }
+    const fs = requireNativeModule("fs");
+    const prefix = collection.name + LAYER_SEPARATOR2;
+    const layerElementUuids = new Set(collection.layer_elements || []);
+    const layerGroupUuids = new Set(
+      Group.all.filter((g) => g.name.startsWith(prefix)).map((g) => g.uuid)
+    );
+    const layerElements = Cube.all.filter((c) => layerElementUuids.has(c.uuid)).map((cube) => {
+      const faces = {};
+      for (const fn of ["north", "east", "south", "west", "up", "down"]) {
+        const f = cube.faces?.[fn];
+        if (f)
+          faces[fn] = { uv: f.uv ? [...f.uv] : [0, 0, 64, 64], texture: f.texture, rotation: f.rotation || 0 };
+      }
+      return {
+        uuid: cube.uuid,
+        name: cube.name.startsWith(prefix) ? cube.name.substring(prefix.length) : cube.name,
+        box_uv: false,
+        render_order: "default",
+        locked: cube.locked ?? false,
+        export: cube.export ?? true,
+        from: [...cube.from],
+        to: [...cube.to],
+        autouv: cube.autouv ?? 0,
+        color: cube.color ?? 0,
+        origin: [...cube.origin || [0, 0, 0]],
+        faces
+      };
+    });
+    const allElements = [...layerElements];
+    function hasRelevantDescendant(group) {
+      for (const child of group.children || []) {
+        const childUuid = typeof child === "string" ? child : child.uuid;
+        if (layerElementUuids.has(childUuid) || layerGroupUuids.has(childUuid))
+          return true;
+        const childGroup = Group.all.find((g) => g.uuid === childUuid);
+        if (childGroup && hasRelevantDescendant(childGroup))
+          return true;
+      }
+      return false;
+    }
+    const allProjectGroups = Group.all.filter((g) => layerGroupUuids.has(g.uuid) || hasRelevantDescendant(g)).map((group) => {
+      const isLayerGroup = layerGroupUuids.has(group.uuid);
+      const children = (group.children || []).map((c) => typeof c === "string" ? c : c.uuid).filter((uuid) => {
+        if (isLayerGroup) {
+          return layerElementUuids.has(uuid) || layerGroupUuids.has(uuid);
+        } else {
+          return layerGroupUuids.has(uuid) || layerElementUuids.has(uuid) || Group.all.some((g) => g.uuid === uuid && (layerGroupUuids.has(g.uuid) || hasRelevantDescendant(g)));
+        }
+      });
+      return {
+        name: group.name.startsWith(prefix) ? group.name.substring(prefix.length) : group.name,
+        uuid: group.uuid,
+        export: group.export ?? true,
+        locked: group.locked ?? false,
+        scope: group.scope ?? 0,
+        selected: group.selected ?? false,
+        _static: group._static || { properties: {}, temp_data: {} },
+        origin: [...group.origin || [0, 0, 0]],
+        rotation: [...group.rotation || [0, 0, 0]],
+        color: group.color ?? 0,
+        children,
+        reset: group.reset ?? false,
+        shade: group.shade ?? true,
+        mirror_uv: group.mirror_uv ?? false,
+        visibility: group.visibility ?? true,
+        autouv: group.autouv ?? 0,
+        isOpen: group.isOpen ?? true,
+        primary_selected: group.primary_selected ?? false
+      };
+    });
+    const allGroupUuidsForOutliner = new Set(allProjectGroups.map((g) => g.uuid));
+    const allElementUuidsForOutliner = new Set(allElements.map((e) => e.uuid));
+    const childGroups = /* @__PURE__ */ new Set();
+    for (const g of allProjectGroups)
+      for (const c of g.children || [])
+        if (allGroupUuidsForOutliner.has(c))
+          childGroups.add(c);
+    const rootGroups = allProjectGroups.filter((g) => !childGroups.has(g.uuid));
+    function buildNode(group) {
+      const children = [];
+      for (const childUuid of group.children || []) {
+        if (allElementUuidsForOutliner.has(childUuid))
+          children.push(childUuid);
+        else if (allGroupUuidsForOutliner.has(childUuid)) {
+          const sub = allProjectGroups.find((gg) => gg.uuid === childUuid);
+          if (sub)
+            children.push(buildNode(sub));
+        }
+      }
+      return { ...group, children };
+    }
+    const outliner = rootGroups.map(buildNode);
+    const inGroup = /* @__PURE__ */ new Set();
+    for (const g of allProjectGroups)
+      for (const c of g.children || [])
+        if (allElementUuidsForOutliner.has(c))
+          inGroup.add(c);
+    const rootElems = allElements.filter((e) => !inGroup.has(e.uuid)).map((e) => e.uuid);
+    const fullOutliner = [...outliner, ...rootElems];
+    const textures = Texture.all.filter((t) => collection.texture === t.uuid || t.group && t.group === collection.name).map((tex) => ({
+      uuid: tex.uuid,
+      name: tex.name,
+      path: tex.path || "",
+      mode: tex.mode || "bitmap",
+      source: tex.source
+    }));
+    const bbmodelContent = {
+      meta: { format_version: "5.0", model_format: "bedrock", box_uv: false },
+      name: collection.name,
+      resolution: { width: collection.layer_uv_width || 64, height: collection.layer_uv_height || 64 },
+      elements: allElements,
+      groups: allProjectGroups,
+      outliner: fullOutliner,
+      textures,
+      animations: []
+    };
+    try {
+      if (fs.existsSync(filePath)) {
+        const existing = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        bbmodelContent.animations = existing.animations || [];
+        bbmodelContent.meta = existing.meta || bbmodelContent.meta;
+        bbmodelContent.name = existing.name || collection.name;
+        bbmodelContent.resolution = existing.resolution || bbmodelContent.resolution;
+      }
+      fs.writeFileSync(filePath, JSON.stringify(bbmodelContent, null, 2), "utf-8");
+      const fileName = PathModule ? PathModule.basename(filePath) : filePath.split(/[\\/]/).pop();
+      Blockbench.showQuickMessage(`Saved to ${fileName} (${allElements.length} elements, ${allProjectGroups.length} groups)`);
+    } catch (e) {
+      console.error("[Layers] Error saving layer to file:", e);
+      Blockbench.showQuickMessage(`Error: ${e.message || "Unknown error"}`, 3e3);
     }
   }
   function injectSaveButtons() {
@@ -3040,29 +3807,19 @@
         nameToExportName.set(name, exportName);
       }
     }
-    console.log(`[Layers] layer_elements count: ${elementUuids.size}`);
-    console.log(`[Layers] layer_elements:`, [...elementUuids]);
     if (uuidToExportName.size === 0) {
-      console.log(`[Layers] No layer groups found in Group.all matching layer_elements`);
-      console.log(`[Layers] Group.all names:`, Group.all.map((g) => `${g.name} (${g.uuid})`));
       return null;
     }
-    console.log(`[Layers] Serializing animations for layer "${layerName}" \u2014 ${uuidToExportName.size} bones tracked`);
-    console.log(`[Layers]   UUID map:`, Object.fromEntries(uuidToExportName));
-    console.log(`[Layers]   Name map:`, Object.fromEntries(nameToExportName));
-    console.log(`[Layers] Animation.all count: ${Animation.all.length}`);
     const animations = {};
     let hasAnimations = false;
     for (const anim of Animation.all) {
       if (!anim.animators)
         continue;
-      console.log(`[Layers] --- Animation "${anim.name}" --- animators:`);
       for (const k in anim.animators) {
         const a = anim.animators[k];
         const kfCount = a?.keyframes?.length || 0;
         const uMatch = uuidToExportName.has(k);
         const nMatch = a?.name ? nameToExportName.has(a.name) : false;
-        console.log(`[Layers]   key="${k}" name="${a?.name}" type="${a?.type}" kf=${kfCount} uuid_match=${uMatch} name_match=${nMatch}`);
       }
       const bones = {};
       let hasBones = false;
@@ -3338,6 +4095,73 @@
       }
     }
   }
+  function findLayerTexture(collection) {
+    const textureGroup = TextureGroup.all.find((tg) => tg.name === collection.name);
+    if (textureGroup) {
+      const tex = Texture.all.find((t) => t.group === textureGroup.uuid);
+      if (tex)
+        return tex;
+    }
+    if (collection.texture) {
+      const tex = Texture.all.find((t) => t.uuid === collection.texture);
+      if (tex)
+        return tex;
+    }
+    return Texture.all.find(
+      (t) => t.name && (t.name === collection.name || t.name.startsWith(collection.name + "_") || t.name.startsWith(collection.name + "."))
+    ) ?? null;
+  }
+  function doRestoreLayersAfterLoad() {
+    const layerCollections = Collection.all.filter(
+      (c) => c.export_codec === "animorph_layer"
+    );
+    if (layerCollections.length === 0)
+      return;
+    const coldLayers = layerCollections.filter(
+      (c) => !c.layer_elements || c.layer_elements.length === 0
+    );
+    if (coldLayers.length === 0)
+      return;
+    debugLog(`[Layers] Cold-open restore: ${coldLayers.length} layer(s)`);
+    const fs = isApp ? requireNativeModule("fs") : null;
+    if (fs && isApp) {
+      for (const collection of layerCollections) {
+        if (!collection.export_path) {
+          debugLog(`[Layers] Layer "${collection.name}" has no export_path on cold open`);
+        } else if (collection.export_path) {
+          try {
+            if (!fs.existsSync(collection.export_path)) {
+              debugLog(`[Layers] Layer "${collection.name}" export_path does not exist: ${collection.export_path}`);
+              collection.export_path = void 0;
+            }
+          } catch (e) {
+          }
+        }
+      }
+    }
+    enableMultiTextures();
+    for (const collection of coldLayers) {
+      collection.layer_elements = [...collection.children || []];
+      const layerTexture = findLayerTexture(collection);
+      if (layerTexture) {
+        collection.texture = layerTexture.uuid;
+        for (const uuid of collection.layer_elements) {
+          const cube = Cube.all.find((c) => c.uuid === uuid);
+          if (cube)
+            applyTextureToLayerCube(cube, layerTexture);
+        }
+        debugLog(`[Layers] Restored "${collection.name}" \u2192 "${layerTexture.name}", ${collection.layer_elements.length} elements`);
+      } else {
+        debugLog(`[Layers] No texture found for "${collection.name}"`);
+      }
+    }
+    reapplyMainTexture();
+    Canvas.updateAll();
+  }
+  function restoreLayersAfterLoad() {
+    setTimeout(doRestoreLayersAfterLoad, 200);
+    debugLog("[Layers] Project selected/restored, checking for file path info...");
+  }
   function registerLayerActions() {
     importLayerAction = new Action("animorph_import_layer", {
       name: "Import Model Layer",
@@ -3384,7 +4208,7 @@
       icon: "save",
       description: "Save this layer's changes back to its source file",
       condition: () => {
-        return Collection.selected.length > 0 && Collection.selected.some((c) => c.export_codec === "animorph_layer" && c.export_path);
+        return Collection.selected.length > 0 && Collection.selected.some((c) => c.export_codec === "animorph_layer");
       },
       click: () => {
         for (const collection of Collection.selected) {
@@ -3446,6 +4270,60 @@
         }
       }
     });
+    exportLayerModelAction = new Action("animorph_export_layer_model", {
+      name: "Export Layer Model",
+      icon: "file_upload",
+      description: "Export this layer's geometry to a Bedrock geo.json file",
+      condition: () => {
+        return Collection.selected.length > 0 && Collection.selected.some((c) => c.export_codec === "animorph_layer");
+      },
+      click: () => {
+        for (const collection of Collection.selected) {
+          if (collection.export_codec === "animorph_layer") {
+            exportLayerModel(collection);
+          }
+        }
+      }
+    });
+    saveLayerToFileAction = new Action("animorph_save_layer_to_file", {
+      name: "Save Layer with Hierarchy",
+      icon: "account_tree",
+      description: "Save this layer with the full bone hierarchy (main model bones + layer geometry)",
+      condition: () => {
+        return Collection.selected.length > 0 && Collection.selected.some((c) => c.export_codec === "animorph_layer" && c.export_path);
+      },
+      click: () => {
+        for (const collection of Collection.selected) {
+          if (collection.export_codec === "animorph_layer") {
+            saveLayerToFile(collection);
+          }
+        }
+      }
+    });
+    reloadMainModelAction = new Action("animorph_reload_main_model", {
+      name: "Reload Model",
+      icon: "refresh",
+      description: "Reload the current model from file (opens file dialog)",
+      condition: () => isApp,
+      click: () => {
+        if (!isApp) {
+          Blockbench.showQuickMessage("Reload Model is only available in the desktop app", 2e3);
+          return;
+        }
+        Blockbench.import({
+          resource_id: "reload_model_file",
+          extensions: ["bbmodel"],
+          type: "Blockbench Model",
+          multiple: false,
+          readtype: "text"
+        }, (files) => {
+          if (files && files.length > 0) {
+            currentProjectPath = files[0].path;
+            Blockbench.showQuickMessage("Model reloaded", 1500);
+          }
+        });
+      }
+    });
     deleteHandler = SharedActions.add("delete", {
       subject: "animorph_layer_collection",
       priority: 1,
@@ -3476,16 +4354,65 @@
       toolbar.add(importLayerAction);
       toolbar.add(reloadAllLayersAction);
     }
+    function injectReloadModelButton() {
+      const modeSelector = document.getElementById("mode_selector");
+      if (modeSelector && !document.getElementById("mode_reload_btn")) {
+        const li = document.createElement("li");
+        li.id = "mode_reload_btn";
+        li.title = "Reload Model from file";
+        li.innerHTML = '<i class="material-icons notranslate icon">refresh</i>\n		Reload';
+        li.addEventListener("click", () => {
+          if (reloadMainModelAction)
+            reloadMainModelAction.click();
+        });
+        const firstLi = modeSelector.querySelector("li");
+        if (firstLi) {
+          modeSelector.insertBefore(li, firstLi);
+        } else {
+          modeSelector.appendChild(li);
+        }
+        debugLog("[Layers] Injected Reload Model button into mode_selector");
+      }
+    }
+    setTimeout(injectReloadModelButton, 500);
+    setTimeout(injectReloadModelButton, 2e3);
+    setTimeout(injectReloadModelButton, 5e3);
+    Blockbench.on("select_project", injectReloadModelButton);
     if (Collection.prototype.menu) {
-      Collection.prototype.menu.addAction(saveLayerAction, 9);
-      Collection.prototype.menu.addAction(exportLayerAnimAction, 10);
-      Collection.prototype.menu.addAction(reloadLayerAction, 11);
-      Collection.prototype.menu.addAction(toggleVisibilityAction, 12);
+      Collection.prototype.menu.addAction(saveLayerAction, 10);
+      Collection.prototype.menu.addAction(saveLayerToFileAction, 10.5);
+      Collection.prototype.menu.addAction(exportLayerModelAction, 20);
+      Collection.prototype.menu.addAction(exportLayerAnimAction, 21);
+      Collection.prototype.menu.addAction(reloadLayerAction, 22);
+      Collection.prototype.menu.addAction(toggleVisibilityAction, 23);
     }
     setupSaveButtonObserver();
     setupCtrlSHook();
     setupCompileFilters();
     setupAnimCompileFilter();
+    selectProjectHandler = restoreLayersAfterLoad;
+    Blockbench.on("select_project", selectProjectHandler);
+    const trackProjectPath = () => {
+      setTimeout(() => {
+        if (Project?.save_path) {
+          currentProjectPath = Project.save_path;
+        } else if (Project?.export_path) {
+          currentProjectPath = Project.export_path;
+        } else {
+          const layerCollections = Collection.all.filter((c) => c.export_codec === "animorph_layer");
+          for (const lc of layerCollections) {
+            if (lc.export_path) {
+              currentProjectPath = lc.export_path;
+              break;
+            }
+          }
+        }
+        debugLog(`[Layers] Project path tracked: ${currentProjectPath || "unknown"}`);
+      }, 200);
+    };
+    Blockbench.on("select_project", trackProjectPath);
+    Blockbench.on("open_project", trackProjectPath);
+    Blockbench.on("save_project", trackProjectPath);
     debugLog("\u2713 Layer actions registered");
   }
   function unregisterLayerActions() {
@@ -3498,6 +4425,8 @@
     }
     if (Collection.prototype.menu) {
       Collection.prototype.menu.removeAction("animorph_save_layer");
+      Collection.prototype.menu.removeAction("animorph_export_layer_model");
+      Collection.prototype.menu.removeAction("animorph_save_layer_to_file");
       Collection.prototype.menu.removeAction("animorph_export_layer_animations");
       Collection.prototype.menu.removeAction("animorph_reload_layer");
       Collection.prototype.menu.removeAction("animorph_toggle_layer_visibility");
@@ -3522,6 +4451,23 @@
       toggleVisibilityAction.delete();
       toggleVisibilityAction = null;
     }
+    if (exportLayerModelAction) {
+      exportLayerModelAction.delete();
+      exportLayerModelAction = null;
+    }
+    if (saveLayerToFileAction) {
+      saveLayerToFileAction.delete();
+      saveLayerToFileAction = null;
+    }
+    if (reloadMainModelAction) {
+      reloadMainModelAction.delete();
+      reloadMainModelAction = null;
+    }
+    const reloadBtn = document.getElementById("mode_reload_btn");
+    if (reloadBtn) {
+      reloadBtn.remove();
+      debugLog("[Layers] Removed injected Reload Model button");
+    }
     if (exportLayerAnimAction) {
       exportLayerAnimAction.delete();
       exportLayerAnimAction = null;
@@ -3534,6 +4480,10 @@
     teardownCtrlSHook();
     teardownCompileFilters();
     teardownAnimCompileFilter();
+    if (selectProjectHandler) {
+      Blockbench.removeListener("select_project", selectProjectHandler);
+      selectProjectHandler = null;
+    }
     debugLog("\u2713 Layer actions unregistered");
   }
 
@@ -6648,6 +7598,7 @@
     "right_hand_item"
   ];
   var fpAction = null;
+  var resetViewAction = null;
   var isFirstPerson = false;
   var savedCameraState = null;
   var hiddenMeshes = /* @__PURE__ */ new Map();
@@ -6670,7 +7621,7 @@
     }
     return false;
   }
-  var CAMERA_PULLBACK = 17;
+  var CAMERA_PULLBACK = 14.5;
   function readCameraPosition() {
     const headBone = findBone("head");
     if (headBone && headBone.origin) {
@@ -6730,6 +7681,34 @@
       controlsEnabled: p.controls ? p.controls.enabled : true,
       controlsTarget: p.controls && p.controls.target ? p.controls.target.clone() : null
     };
+  }
+  function resetCameraToCenter() {
+    const p = getPreview();
+    if (!p || !p.controls)
+      return;
+    const elements = typeof Outliner !== "undefined" && Outliner.elements ? Outliner.elements : [];
+    if (elements.length === 0)
+      return;
+    const box = new THREE.Box3();
+    for (const element of elements) {
+      if (element.mesh) {
+        box.expandByObject(element.mesh);
+      }
+    }
+    if (!box.isEmpty()) {
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      p.controls.target.copy(center);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const distance = maxDim * 2;
+      p.camera.position.set(center.x, center.y + maxDim * 0.3, center.z + distance);
+      p.camera.lookAt(center);
+    }
+    p.controls.enabled = true;
+    if (p.controls.update)
+      p.controls.update();
   }
   function restoreCameraState() {
     const p = getPreview();
@@ -6817,7 +7796,17 @@
       description: "Toggle first-person camera to preview FP arm animations",
       click: toggleFirstPerson
     });
+    resetViewAction = new Action("reset_view_center", {
+      name: "Reset View",
+      icon: "center_focus_strong",
+      description: "Reset camera to center on the model",
+      click: () => {
+        resetCameraToCenter();
+        Blockbench.showQuickMessage("View reset to center", 1e3);
+      }
+    });
     MenuBar.addAction(fpAction, "view");
+    MenuBar.addAction(resetViewAction, "view");
     Blockbench.on("render_frame", onRenderFrame2);
     Blockbench.on("select_project", forceExitFirstPerson);
     debugLog("First Person View module registered");
@@ -6831,12 +7820,134 @@
       fpAction.delete();
       fpAction = null;
     }
+    if (resetViewAction) {
+      MenuBar.removeAction(resetViewAction.id);
+      resetViewAction.delete();
+      resetViewAction = null;
+    }
     debugLog("First Person View module unregistered");
+  }
+
+  // src/camera-preview/index.ts
+  var CAMERA_BONE_NAME = "camera";
+  var camAction = null;
+  var isActive = false;
+  var restPos = null;
+  var restRot = null;
+  var _curPos = new THREE.Vector3();
+  var _curQuat = new THREE.Quaternion();
+  var _restQInv = new THREE.Quaternion();
+  var _rotDelta = new THREE.Quaternion();
+  var _tempEuler = new THREE.Euler();
+  function getPreview2() {
+    const preview = Preview.selected;
+    return preview?.camera ? preview : null;
+  }
+  function findCameraBone() {
+    const groups = typeof getAllGroups === "function" ? getAllGroups() : [];
+    return groups.find((g) => g.name?.toLowerCase() === CAMERA_BONE_NAME) ?? null;
+  }
+  var _frameCount = 0;
+  function onRenderFrame3() {
+    if (!isActive || !restPos || !restRot)
+      return;
+    const p = getPreview2();
+    if (!p)
+      return;
+    const bone = findCameraBone();
+    if (!bone?.mesh)
+      return;
+    _curPos.copy(bone.mesh.position);
+    _curQuat.setFromEuler(bone.mesh.rotation);
+    const dx = _curPos.x - restPos.x;
+    const dy = _curPos.y - restPos.y;
+    const dz = _curPos.z - restPos.z;
+    _restQInv.copy(restRot).invert();
+    _rotDelta.copy(_curQuat).multiply(_restQInv);
+    _frameCount++;
+    if (_frameCount % 30 === 0) {
+      _tempEuler.setFromQuaternion(_rotDelta);
+      console.log(
+        `[CT] bone local pos=(${_curPos.x.toFixed(3)}, ${_curPos.y.toFixed(3)}, ${_curPos.z.toFixed(3)})`,
+        `rot=(${THREE.MathUtils.radToDeg(bone.mesh.rotation.x).toFixed(1)}\xB0, ${THREE.MathUtils.radToDeg(bone.mesh.rotation.y).toFixed(1)}\xB0, ${THREE.MathUtils.radToDeg(bone.mesh.rotation.z).toFixed(1)}\xB0)`
+      );
+      console.log(
+        `[CT] pos delta=(${dx.toFixed(3)}, ${dy.toFixed(3)}, ${dz.toFixed(3)})`,
+        `rot delta=(${THREE.MathUtils.radToDeg(_tempEuler.x).toFixed(1)}\xB0, ${THREE.MathUtils.radToDeg(_tempEuler.y).toFixed(1)}\xB0, ${THREE.MathUtils.radToDeg(_tempEuler.z).toFixed(1)}\xB0)`
+      );
+    }
+    p.camera.position.x += dx;
+    p.camera.position.y += dy;
+    p.camera.position.z += dz;
+    p.camera.quaternion.premultiply(_rotDelta);
+    p.camera.updateProjectionMatrix();
+  }
+  function enable() {
+    const bone = findCameraBone();
+    if (!bone?.mesh) {
+      Blockbench.showQuickMessage(`No "${CAMERA_BONE_NAME}" bone found in model`, 2e3);
+      return;
+    }
+    restPos = bone.mesh.position.clone();
+    restRot = new THREE.Quaternion().setFromEuler(bone.mesh.rotation);
+    _frameCount = 0;
+    isActive = true;
+    camAction?.setIcon("videocam");
+    Blockbench.showQuickMessage("Camera Transform: ON", 1500);
+    console.log(
+      `[CameraTransform] ON \u2014 rest pos: (${restPos.x.toFixed(3)}, ${restPos.y.toFixed(3)}, ${restPos.z.toFixed(3)})`,
+      `rest rot: (${THREE.MathUtils.radToDeg(bone.mesh.rotation.x).toFixed(1)}\xB0, ${THREE.MathUtils.radToDeg(bone.mesh.rotation.y).toFixed(1)}\xB0, ${THREE.MathUtils.radToDeg(bone.mesh.rotation.z).toFixed(1)}\xB0)`
+    );
+    debugLog("[CameraTransform] ON");
+  }
+  function disable() {
+    isActive = false;
+    restPos = null;
+    restRot = null;
+    camAction?.setIcon("videocam_off");
+    Blockbench.showQuickMessage("Camera Transform: OFF", 1500);
+    debugLog("[CameraTransform] OFF");
+  }
+  function toggle() {
+    isActive ? disable() : enable();
+  }
+  function forceExitCameraPreview() {
+    if (isActive)
+      disable();
+  }
+  function registerCameraPreview() {
+    camAction = new Action("camera_transform_toggle", {
+      name: "Camera Transform",
+      icon: "videocam_off",
+      description: `Apply the "${CAMERA_BONE_NAME}" bone's transform as an offset to the current view`,
+      click: toggle,
+      keybind: new Blockbench.Keybind({ key: "p", ctrl: true, shift: true }),
+      condition: () => false
+      // Disabled — not ready yet
+    });
+    MenuBar.addAction(camAction, "view");
+    Blockbench.on("render_frame", onRenderFrame3);
+    Blockbench.on("select_project", forceExitCameraPreview);
+    debugLog("[CameraTransform] Registered");
+  }
+  function unregisterCameraPreview() {
+    Blockbench.removeListener("render_frame", onRenderFrame3);
+    Blockbench.removeListener("select_project", forceExitCameraPreview);
+    if (camAction) {
+      MenuBar.removeAction("camera_transform_toggle");
+      camAction.delete();
+      camAction = null;
+    }
+    isActive = false;
+    restPos = null;
+    restRot = null;
+    debugLog("[CameraTransform] Unregistered");
   }
 
   // src/index.ts
   var loopStartProperty = null;
   function onLoad() {
+    startChangelogInjector();
     loopStartProperty = new Property(Animation, "number", PROPERTY_NAME, {
       default: PROPERTY_DEFAULT
     });
@@ -6865,9 +7976,11 @@
     registerModelConfig();
     initializeSync();
     registerFirstPerson();
+    registerCameraPreview();
     debugLog(`\u2713 ${PLUGIN_NAME} v${PLUGIN_VERSION} loaded`);
   }
   function onUnload() {
+    stopChangelogInjector();
     Blockbench.removeListener("compile_bedrock_animation", onCompileAnimation);
     Blockbench.removeListener("parse_bedrock_animation", onParseBedrock);
     Blockbench.removeListener("select_animation", onAnimationSelect);
@@ -6892,6 +8005,7 @@
     unregisterModelConfig();
     cleanupSync();
     unregisterFirstPerson();
+    unregisterCameraPreview();
     debugLog(`\u2713 ${PLUGIN_NAME} unloaded`);
   }
   Plugin.register(PLUGIN_ID, {
@@ -6899,7 +8013,8 @@
     author: "feeldev",
     icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CiAgPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzRhZGU4MCIvPgogIDx0ZXh0IHg9IjE2IiB5PSIyMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXdlaWdodD0iODAwIiBmb250LXNpemU9IjIyIiBmaWxsPSIjMGYxMjE5Ij5BPC90ZXh0Pgo8L3N2Zz4K",
     description: "Animorph's Blockbench plugin \u2014 build, sync and preview your mod assets in real time.",
-    about: "## Animorph Tools\n\nA toolkit for Minecraft Bedrock & GeckoLib mod development.\n\n### Features\n\n**Loop Start** \u2014 Add GeckoLib's `loop_start` property directly from the animation properties dialog, with a visual marker in the timeline.\n\n**Poly Mesh** \u2014 Export and import meshes as `poly_mesh` for Bedrock geometry files.\n\n**Text Display** \u2014 Create 3D text elements rendered as in-world cubes, with full font and style control.\n\n**Reference Layers** \u2014 Load reference models as overlay layers to compare against your current model.\n\n**Texture Layers** \u2014 Manage and preview texture layers inside Blockbench.\n\n**Emote Config** \u2014 Configure and export emote definitions to YAML for use in your mod.\n\n**Model Config** \u2014 Per-model configuration with YAML export for Bedrock/GeckoLib entity definitions.\n\n**Remote Sync** \u2014 Live WebSocket sync with a running Fabric mod. Push animations and model data directly into Minecraft without reloading.\n\n**First Person View** \u2014 Preview your model from a first-person camera perspective inside Blockbench.\n\n### Links\n\n[Wiki & Documentation](https://animorph.crewved.com/) \u2014 [Discord](https://discord.com/invite/uHMY5hxeK4)",
+    about: "## Animorph Tools\n\nA toolkit for Minecraft Bedrock & GeckoLib mod development.\n\n### Features\n\n**Loop Start** \u2014 Add GeckoLib's `loop_start` property directly from the animation properties dialog, with a visual marker in the timeline.\n\n**Poly Mesh** \u2014 Export and import meshes as `poly_mesh` for Bedrock geometry files.\n\n**Text Display** \u2014 Create 3D text elements rendered as in-world cubes, with full font and style control.\n\n**Reference Layers** \u2014 Load reference models as overlay layers to compare against your current model.\n\n**Texture Layers** \u2014 Manage and preview texture layers inside Blockbench.\n\n**Emote Config** \u2014 Configure and export emote definitions to YAML for use in your mod.\n\n**Model Config** \u2014 Per-model configuration with YAML export for Bedrock/GeckoLib entity definitions.\n\n**Remote Sync** \u2014 Live WebSocket sync with a running Fabric mod. Push animations and model data directly into Minecraft without reloading.\n\n**First Person View** \u2014 Preview your model from a first-person camera perspective inside Blockbench.\n\n**Reset View** \u2014 Reset camera to center on the model with one click.\n\n**Camera Transform** \u2014 Apply the `camera` bone transform as an offset to the current view. _(Coming soon)_\n\n### Links\n\n[Wiki & Documentation](https://animorph.crewved.com/) \u2014 [Discord](https://discord.com/invite/uHMY5hxeK4)",
+    has_changelog: true,
     version: PLUGIN_VERSION,
     variant: "both",
     tags: ["Minecraft: Bedrock Edition", "GeckoLib", "Animations", "Mesh", "Text Display", "Layers", "Emote", "Remote Sync"],

@@ -1,0 +1,38 @@
+{
+  "1.1.0-beta": {
+    "title": "1.1.0-beta",
+    "author": "feeldev",
+    "date": "2026-04-13",
+    "categories": [
+      {
+        "title": "New Features",
+        "list": [
+          "First Person View — toggle FP camera to preview arm animations",
+          "Reset View — button to re-center camera on model",
+          "Emote Config — configure and export emotes to YAML",
+          "Model Config — per-model YAML export for entity definitions",
+          "Texture Layers — manage and preview texture layers"
+        ]
+      },
+      {
+        "title": "Coming Soon",
+        "list": [
+          "Camera Transform — apply the camera bone transform as an offset to the current view (disabled)"
+        ]
+      }
+    ]
+  },
+  "1.0.2": {
+    "title": "1.0.2",
+    "author": "feeldev",
+    "categories": [
+      {
+        "title": "New Features",
+        "list": [
+          "Remote Sync with WebSocket support",
+          "Sync animations and model data to Minecraft in real time"
+        ]
+      }
+    ]
+  }
+}
