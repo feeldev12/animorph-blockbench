@@ -1,4 +1,25 @@
 {
+  "1.1.1-beta": {
+    "title": "1.1.1-beta",
+    "author": "feeldev",
+    "date": "2026-04-13",
+    "categories": [
+      {
+        "title": "Bug Fixes",
+        "list": [
+          "Fixed layer save not preserving transformations (only animations were saved)",
+          "Fixed model layer textures not loading correctly after closing and reopening Blockbench"
+        ]
+      },
+      {
+        "title": "New Features",
+        "list": [
+          "Save Layer with Base Model — new button that saves a layer with the full base model hierarchy",
+          "Reset View — button to re-center camera on model"
+        ]
+      }
+    ]
+  },
   "1.1.0-beta": {
     "title": "1.1.0-beta",
     "author": "feeldev",
@@ -8,7 +29,6 @@
         "title": "New Features",
         "list": [
           "First Person View — toggle FP camera to preview arm animations",
-          "Reset View — button to re-center camera on model",
           "Emote Config — configure and export emotes to YAML",
           "Model Config — per-model YAML export for entity definitions",
           "Texture Layers — manage and preview texture layers"
