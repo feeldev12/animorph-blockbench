@@ -11,7 +11,7 @@
   // src/core/constants.ts
   var PLUGIN_ID = "animorph-tools";
   var PLUGIN_NAME = "Animorph Tools";
-  var PLUGIN_VERSION = "1.1.0-beta";
+  var PLUGIN_VERSION = "1.1.1-beta";
   var PROPERTY_NAME = "loop_start";
   var PROPERTY_DEFAULT = 0;
   var MARKER_ID = "timeline_loop_start_marker";
@@ -23,6 +23,7 @@
   // src/changelog-injector/index.ts
   var CHANGELOG_URL = "https://raw.githubusercontent.com/feeldev12/animorph-blockbench/main/changelog.json";
   var CONTAINER_ID = "at_changelog_panel";
+  var TAB_ID = "at_changelog_tab";
   var CACHE_KEY = "animorph_changelog_cache";
   var CACHE_HASH_KEY = "animorph_changelog_cache_hash";
   function hashStr(str) {
@@ -71,11 +72,22 @@
       return false;
     const tabs = tabBar.querySelectorAll("li");
     for (const tab of tabs) {
-      if (tab.classList.contains("selected")) {
-        return tab.textContent?.trim() === "Changelog";
+      if (tab.id === TAB_ID && tab.classList.contains("selected")) {
+        return true;
       }
     }
     return false;
+  }
+  async function fetchChangelog() {
+    try {
+      const res = await fetch(CHANGELOG_URL);
+      if (res.ok) {
+        const text = await res.text();
+        return text;
+      }
+    } catch (e) {
+    }
+    return null;
   }
   function getCachedChangelog() {
     try {
@@ -88,9 +100,7 @@
     try {
       localStorage.setItem(CACHE_KEY, jsonStr);
       localStorage.setItem(CACHE_HASH_KEY, hashStr(jsonStr));
-      debugLog("\u2713 Changelog cached in localStorage");
     } catch {
-      debugLog("\u26A0 Failed to cache changelog in localStorage");
     }
   }
   function getCachedHash() {
@@ -100,20 +110,6 @@
       return null;
     }
   }
-  async function fetchChangelog() {
-    try {
-      const res = await fetch(CHANGELOG_URL);
-      if (res.ok) {
-        const text = await res.text();
-        debugLog("\u2713 Changelog fetched from GitHub");
-        return text;
-      }
-      debugLog("\u26A0 GitHub fetch failed (status " + res.status + ")");
-    } catch (e) {
-      debugLog("\u26A0 Fetch failed");
-    }
-    return null;
-  }
   async function resolveChangelog() {
     const remote = await fetchChangelog();
     if (remote) {
@@ -121,32 +117,52 @@
       const cachedHash = getCachedHash();
       if (remoteHash !== cachedHash) {
         saveCachedChangelog(remote);
-        debugLog("\u2713 Changelog updated from GitHub");
-        return { data: JSON.parse(remote), source: "remote" };
       }
       return { data: JSON.parse(remote), source: "remote" };
     }
     const cached = getCachedChangelog();
     if (cached) {
-      debugLog("\u2713 Using cached changelog (fetch failed)");
       return { data: JSON.parse(cached), source: "cache" };
     }
-    debugLog("\u26A0 No changelog available (no GitHub, no cache)");
     return null;
+  }
+  function ensureTab() {
+    const tabBar = document.getElementById("plugin_browser_page_tab_bar");
+    if (!tabBar)
+      return;
+    if (document.getElementById(TAB_ID))
+      return;
+    const tabs = Array.from(tabBar.querySelectorAll("li"));
+    let insertBefore = null;
+    for (const tab of tabs) {
+      if (tab.textContent?.trim() === "Settings") {
+        insertBefore = tab;
+        break;
+      }
+    }
+    const tabLi = document.createElement("li");
+    tabLi.id = TAB_ID;
+    tabLi.textContent = "Changelog";
+    if (insertBefore) {
+      tabBar.insertBefore(tabLi, insertBefore);
+    } else {
+      tabBar.appendChild(tabLi);
+    }
+    debugLog("\u2713 Changelog tab created");
   }
   function getOrCreateContainer() {
     let container = document.getElementById(CONTAINER_ID);
     if (container)
       return container;
-    const nativeUl = document.getElementById("plugin_browser_changelog");
-    if (!nativeUl || !nativeUl.parentElement)
+    const page = document.getElementById("plugin_browser_page");
+    if (!page)
       return null;
     container = document.createElement("div");
     container.id = CONTAINER_ID;
     container.style.display = "none";
     container.style.padding = "12px 16px";
     container.style.overflowY = "auto";
-    nativeUl.parentElement.insertBefore(container, nativeUl.nextSibling);
+    page.appendChild(container);
     return container;
   }
   function updateVisibility() {
@@ -178,26 +194,31 @@
       debugLog("\u26A0 No changelog to display");
     }
   }
-  function onTabBarClick(_e) {
-    setTimeout(() => {
-      if (isOnOurPluginPage() && isChangelogTabSelected()) {
-        refreshChangelog();
+  function onTabBarClick(e) {
+    const target = e.target;
+    const tabLi = target.closest("#" + TAB_ID);
+    if (tabLi) {
+      e.preventDefault();
+      const tabBar = document.getElementById("plugin_browser_page_tab_bar");
+      if (tabBar) {
+        tabBar.querySelectorAll("li").forEach((t) => t.classList.remove("selected"));
       }
-      updateVisibility();
-    }, 150);
+      tabLi.classList.add("selected");
+      setTimeout(async () => {
+        await refreshChangelog();
+        updateVisibility();
+      }, 100);
+    }
   }
   function startChangelogInjector() {
     setTimeout(() => {
+      if (!isOnOurPluginPage())
+        return;
+      ensureTab();
       const tabBar = document.getElementById("plugin_browser_page_tab_bar");
       if (tabBar) {
         tabBar.addEventListener("click", onTabBarClick);
         debugLog("\u2713 Changelog injector: tab click listener attached");
-      }
-      if (isOnOurPluginPage() && isChangelogTabSelected()) {
-        setTimeout(async () => {
-          await refreshChangelog();
-          updateVisibility();
-        }, 500);
       }
     }, 700);
   }
@@ -206,6 +227,9 @@
     if (tabBar) {
       tabBar.removeEventListener("click", onTabBarClick);
     }
+    const tab = document.getElementById(TAB_ID);
+    if (tab)
+      tab.remove();
     const container = document.getElementById(CONTAINER_ID);
     if (container)
       container.remove();
@@ -8014,7 +8038,6 @@
     icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CiAgPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzRhZGU4MCIvPgogIDx0ZXh0IHg9IjE2IiB5PSIyMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXdlaWdodD0iODAwIiBmb250LXNpemU9IjIyIiBmaWxsPSIjMGYxMjE5Ij5BPC90ZXh0Pgo8L3N2Zz4K",
     description: "Animorph's Blockbench plugin \u2014 build, sync and preview your mod assets in real time.",
     about: "## Animorph Tools\n\nA toolkit for Minecraft Bedrock & GeckoLib mod development.\n\n### Features\n\n**Loop Start** \u2014 Add GeckoLib's `loop_start` property directly from the animation properties dialog, with a visual marker in the timeline.\n\n**Poly Mesh** \u2014 Export and import meshes as `poly_mesh` for Bedrock geometry files.\n\n**Text Display** \u2014 Create 3D text elements rendered as in-world cubes, with full font and style control.\n\n**Reference Layers** \u2014 Load reference models as overlay layers to compare against your current model.\n\n**Texture Layers** \u2014 Manage and preview texture layers inside Blockbench.\n\n**Emote Config** \u2014 Configure and export emote definitions to YAML for use in your mod.\n\n**Model Config** \u2014 Per-model configuration with YAML export for Bedrock/GeckoLib entity definitions.\n\n**Remote Sync** \u2014 Live WebSocket sync with a running Fabric mod. Push animations and model data directly into Minecraft without reloading.\n\n**First Person View** \u2014 Preview your model from a first-person camera perspective inside Blockbench.\n\n**Reset View** \u2014 Reset camera to center on the model with one click.\n\n**Camera Transform** \u2014 Apply the `camera` bone transform as an offset to the current view. _(Coming soon)_\n\n### Links\n\n[Wiki & Documentation](https://animorph.crewved.com/) \u2014 [Discord](https://discord.com/invite/uHMY5hxeK4)",
-    has_changelog: true,
     version: PLUGIN_VERSION,
     variant: "both",
     tags: ["Minecraft: Bedrock Edition", "GeckoLib", "Animations", "Mesh", "Text Display", "Layers", "Emote", "Remote Sync"],
