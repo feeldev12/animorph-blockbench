@@ -11,7 +11,7 @@
   // src/core/constants.ts
   var PLUGIN_ID = "animorph-tools";
   var PLUGIN_NAME = "Animorph Tools";
-  var PLUGIN_VERSION = "1.1.1-beta";
+  var PLUGIN_VERSION = "1.1.2-beta";
   var PROPERTY_NAME = "loop_start";
   var PROPERTY_DEFAULT = 0;
   var MARKER_ID = "timeline_loop_start_marker";
@@ -395,6 +395,46 @@
   var originalAnimationImport = null;
   var originalBlockbenchImport = null;
   var LAYER_SEPARATOR = ".";
+  function normalizeGeckoLibKeyframes(jsonContent) {
+    if (!jsonContent?.animations)
+      return false;
+    let changed = false;
+    for (const animName in jsonContent.animations) {
+      const anim = jsonContent.animations[animName];
+      if (!anim?.bones)
+        continue;
+      for (const boneName in anim.bones) {
+        const bone = anim.bones[boneName];
+        for (const channel of ["rotation", "position", "scale"]) {
+          const channelData = bone[channel];
+          if (!channelData || typeof channelData !== "object" || Array.isArray(channelData))
+            continue;
+          for (const timestamp in channelData) {
+            const kf = channelData[timestamp];
+            if (!kf || typeof kf !== "object" || Array.isArray(kf))
+              continue;
+            let modified = false;
+            if (kf.pre && typeof kf.pre === "object" && !Array.isArray(kf.pre) && Array.isArray(kf.pre.vector)) {
+              kf.pre = kf.pre.vector;
+              modified = true;
+            }
+            if (kf.post && typeof kf.post === "object" && !Array.isArray(kf.post) && Array.isArray(kf.post.vector)) {
+              kf.post = kf.post.vector;
+              modified = true;
+            }
+            if (modified) {
+              changed = true;
+              debugLog(`[GeckoLib patch] Normalized keyframe ${timestamp} in ${animName}/${boneName}/${channel}`);
+            }
+          }
+        }
+      }
+    }
+    if (changed) {
+      debugLog("[GeckoLib patch] Applied keyframe normalization \u2014 pre/post {vector} \u2192 plain array");
+    }
+    return changed;
+  }
   function remapLayerBoneNamesInJson(jsonContent) {
     if (!jsonContent?.animations || typeof Collection === "undefined")
       return false;
@@ -448,7 +488,9 @@
           try {
             const jsonContent = JSON.parse(file.content);
             window._tempAnimationJson = jsonContent;
-            if (remapLayerBoneNamesInJson(jsonContent)) {
+            const geckoPatched = normalizeGeckoLibKeyframes(jsonContent);
+            const remapped = remapLayerBoneNamesInJson(jsonContent);
+            if (geckoPatched || remapped) {
               file.content = JSON.stringify(jsonContent);
             }
           } catch (error) {
@@ -500,6 +542,13 @@
                 const parsed = JSON.parse(content);
                 if (parsed?.animations && typeof parsed.animations === "object") {
                   window._tempAnimationJson = parsed;
+                  if (normalizeGeckoLibKeyframes(parsed)) {
+                    const serialized = JSON.stringify(parsed);
+                    if (file.content !== void 0)
+                      file.content = serialized;
+                    else if (file.data !== void 0)
+                      file.data = serialized;
+                  }
                   debugLog("\u2713 Animaci\xF3n capturada via Blockbench.import");
                 }
               }
@@ -1872,13 +1921,20 @@
   var exportLayerAnimAction = null;
   var exportLayerModelAction = null;
   var saveLayerToFileAction = null;
-  var reloadMainModelAction = null;
   var layerSaveObserver = null;
   var ctrlSHandler = null;
-  var currentProjectPath = null;
   var selectProjectHandler = null;
   var compileFilterHandlers = [];
   var animCompileFilterHandler = null;
+  var includeLayerBonesInMainAnimAction = null;
+  var INCLUDE_LAYER_BONES_SETTING_KEY = "animorph_include_layer_bones_in_main_anim";
+  function getIncludeLayerBonesInMainAnim() {
+    const stored = localStorage.getItem(INCLUDE_LAYER_BONES_SETTING_KEY);
+    return stored === null ? true : stored === "true";
+  }
+  function setIncludeLayerBonesInMainAnim(value) {
+    localStorage.setItem(INCLUDE_LAYER_BONES_SETTING_KEY, value ? "true" : "false");
+  }
   var layerAnimBuffer = /* @__PURE__ */ new Map();
   var compileFlushTimer = null;
   function guid() {
@@ -1943,7 +1999,7 @@
     debugLog("[Layers] Multi-textures disabled");
   }
   function hasLayers() {
-    return Collection.all.some((c) => c.export_codec === "animorph_layer");
+    return typeof Collection !== "undefined" && Array.isArray(Collection.all) && Collection.all.some((c) => c.export_codec === "animorph_layer");
   }
   function updateMultiTexturesState() {
     if (hasLayers()) {
@@ -3445,6 +3501,8 @@
       const name = nameEl.textContent?.trim();
       if (!name)
         continue;
+      if (!Array.isArray(Collection?.all))
+        continue;
       const collection = Collection.all.find(
         (c) => c.export_codec === "animorph_layer" && c.name === name
       );
@@ -3604,7 +3662,8 @@
       }
     } else if (layerBones.length > 0) {
       const animName = data.animation?.name || "unknown";
-      console.log(`[Layers:AnimCompile] MIXED \u2192 extracting ${layerBones.length} layer bones from "${animName}"`);
+      const includeInMain = getIncludeLayerBonesInMainAnim();
+      console.log(`[Layers:AnimCompile] MIXED \u2192 extracting ${layerBones.length} layer bones from "${animName}" (includeInMain: ${includeInMain})`);
       for (const boneName of layerBones) {
         const info = layerBoneInfo.get(boneName);
         const boneData = data.json.bones[boneName];
@@ -3621,7 +3680,14 @@
           });
         }
         layerAnims.get(animName).bones[info.exportName] = boneData;
-        delete data.json.bones[boneName];
+        if (includeInMain) {
+          if (info.exportName !== boneName) {
+            data.json.bones[info.exportName] = boneData;
+          }
+          delete data.json.bones[boneName];
+        } else {
+          delete data.json.bones[boneName];
+        }
       }
       console.log(`[Layers:AnimCompile] Buffer state after extraction:`, [...layerAnimBuffer.entries()].map(
         ([name, anims]) => `${name}: ${[...anims.entries()].map(([a, d]) => `${a}(${Object.keys(d.bones).length} bones)`).join(", ")}`
@@ -4228,6 +4294,19 @@
         }
       }
     });
+    includeLayerBonesInMainAnimAction = new Action("animorph_include_layer_bones_in_main_anim", {
+      name: "Include Layer Bones in Main Animation",
+      icon: () => getIncludeLayerBonesInMainAnim() ? "check_box" : "check_box_outline_blank",
+      description: "When enabled, layer bones are included in the main animation export (without prefix) in addition to being written to the layer's animation file",
+      click: () => {
+        const newValue = !getIncludeLayerBonesInMainAnim();
+        setIncludeLayerBonesInMainAnim(newValue);
+        Blockbench.showQuickMessage(
+          newValue ? "Layer bones will be included in main animation export" : "Layer bones will be excluded from main animation export",
+          2e3
+        );
+      }
+    });
     exportLayerAnimAction = new Action("animorph_export_layer_animations", {
       name: "Export Layer Animations",
       icon: "movie_filter",
@@ -4273,30 +4352,6 @@
         }
       }
     });
-    reloadMainModelAction = new Action("animorph_reload_main_model", {
-      name: "Reload Model",
-      icon: "refresh",
-      description: "Reload the current model from file (opens file dialog)",
-      condition: () => isApp,
-      click: () => {
-        if (!isApp) {
-          Blockbench.showQuickMessage("Reload Model is only available in the desktop app", 2e3);
-          return;
-        }
-        Blockbench.import({
-          resource_id: "reload_model_file",
-          extensions: ["bbmodel"],
-          type: "Blockbench Model",
-          multiple: false,
-          readtype: "text"
-        }, (files) => {
-          if (files && files.length > 0) {
-            currentProjectPath = files[0].path;
-            Blockbench.showQuickMessage("Model reloaded", 1500);
-          }
-        });
-      }
-    });
     deleteHandler = SharedActions.add("delete", {
       subject: "animorph_layer_collection",
       priority: 1,
@@ -4327,30 +4382,6 @@
       toolbar.add(importLayerAction);
       toolbar.add(reloadAllLayersAction);
     }
-    function injectReloadModelButton() {
-      const modeSelector = document.getElementById("mode_selector");
-      if (modeSelector && !document.getElementById("mode_reload_btn")) {
-        const li = document.createElement("li");
-        li.id = "mode_reload_btn";
-        li.title = "Reload Model from file";
-        li.innerHTML = '<i class="material-icons notranslate icon">refresh</i>\n		Reload';
-        li.addEventListener("click", () => {
-          if (reloadMainModelAction)
-            reloadMainModelAction.click();
-        });
-        const firstLi = modeSelector.querySelector("li");
-        if (firstLi) {
-          modeSelector.insertBefore(li, firstLi);
-        } else {
-          modeSelector.appendChild(li);
-        }
-        debugLog("[Layers] Injected Reload Model button into mode_selector");
-      }
-    }
-    setTimeout(injectReloadModelButton, 500);
-    setTimeout(injectReloadModelButton, 2e3);
-    setTimeout(injectReloadModelButton, 5e3);
-    Blockbench.on("select_project", injectReloadModelButton);
     if (Collection.prototype.menu) {
       Collection.prototype.menu.addAction(saveLayerAction, 10);
       Collection.prototype.menu.addAction(saveLayerToFileAction, 10.5);
@@ -4365,28 +4396,10 @@
     setupAnimCompileFilter();
     selectProjectHandler = restoreLayersAfterLoad;
     Blockbench.on("select_project", selectProjectHandler);
-    const trackProjectPath = () => {
-      setTimeout(() => {
-        if (Project?.save_path) {
-          currentProjectPath = Project.save_path;
-        } else if (Project?.export_path) {
-          currentProjectPath = Project.export_path;
-        } else {
-          const layerCollections = Collection.all.filter((c) => c.export_codec === "animorph_layer");
-          for (const lc of layerCollections) {
-            if (lc.export_path) {
-              currentProjectPath = lc.export_path;
-              break;
-            }
-          }
-        }
-        debugLog(`[Layers] Project path tracked: ${currentProjectPath || "unknown"}`);
-      }, 200);
-    };
-    Blockbench.on("select_project", trackProjectPath);
-    Blockbench.on("open_project", trackProjectPath);
-    Blockbench.on("save_project", trackProjectPath);
     debugLog("\u2713 Layer actions registered");
+  }
+  function getIncludeLayerBonesAction() {
+    return includeLayerBonesInMainAnimAction;
   }
   function unregisterLayerActions() {
     const toolbar = Panels.collections?.toolbars?.[0];
@@ -4432,18 +4445,13 @@
       saveLayerToFileAction.delete();
       saveLayerToFileAction = null;
     }
-    if (reloadMainModelAction) {
-      reloadMainModelAction.delete();
-      reloadMainModelAction = null;
-    }
-    const reloadBtn = document.getElementById("mode_reload_btn");
-    if (reloadBtn) {
-      reloadBtn.remove();
-      debugLog("[Layers] Removed injected Reload Model button");
-    }
     if (exportLayerAnimAction) {
       exportLayerAnimAction.delete();
       exportLayerAnimAction = null;
+    }
+    if (includeLayerBonesInMainAnimAction) {
+      includeLayerBonesInMainAnimAction.delete();
+      includeLayerBonesInMainAnimAction = null;
     }
     if (deleteHandler) {
       deleteHandler.delete();
@@ -4458,6 +4466,41 @@
       selectProjectHandler = null;
     }
     debugLog("\u2713 Layer actions unregistered");
+  }
+
+  // src/menu/index.ts
+  var animorphBarMenu = null;
+  var registeredActions = [];
+  function createAnimorphMenu() {
+    if (animorphBarMenu)
+      return;
+    animorphBarMenu = new BarMenu("animorph", [...registeredActions], { name: "Animorph" });
+    if (animorphBarMenu.label) {
+      animorphBarMenu.label.textContent = "Animorph";
+    }
+    if (MenuBar.update)
+      MenuBar.update();
+    debugLog("[AnimorphMenu] Menu created with", registeredActions.length, "actions");
+  }
+  function addToAnimorphMenu(action) {
+    if (!action) {
+      console.warn("[AnimorphMenu] addToAnimorphMenu: received null/undefined action");
+      return;
+    }
+    registeredActions.push(action);
+    debugLog("[AnimorphMenu] Action registered:", action.id ?? action.name ?? action);
+  }
+  function destroyAnimorphMenu() {
+    if (!animorphBarMenu)
+      return;
+    if (MenuBar.menus) {
+      delete MenuBar.menus["animorph"];
+    }
+    if (MenuBar.update)
+      MenuBar.update();
+    animorphBarMenu = null;
+    registeredActions.length = 0;
+    debugLog("[AnimorphMenu] Menu removed");
   }
 
   // src/texture-layers/index.ts
@@ -4946,6 +4989,8 @@
         continue;
       const name = nameEl.textContent?.trim();
       if (!name)
+        continue;
+      if (!Array.isArray(Collection?.all))
         continue;
       const collection = Collection.all.find(
         (c) => c.export_codec === TEXTURE_LAYER_CODEC && c.name === name
@@ -7767,12 +7812,14 @@
       name: "First Person View",
       icon: "visibility",
       description: "Toggle first-person camera to preview FP arm animations",
+      keybind: new Keybind({ key: "f", ctrl: true, shift: true }),
       click: toggleFirstPerson
     });
     resetViewAction = new Action("reset_view_center", {
       name: "Reset View",
       icon: "center_focus_strong",
       description: "Reset camera to center on the model",
+      keybind: new Keybind({ key: "r", ctrl: true, shift: true }),
       click: () => {
         resetCameraToCenter();
         Blockbench.showQuickMessage("View reset to center", 1e3);
@@ -7944,6 +7991,8 @@
     registerTextDisplayActions();
     installTextDisplayIO();
     registerLayerActions();
+    addToAnimorphMenu(getIncludeLayerBonesAction());
+    createAnimorphMenu();
     registerTextureLayerActions();
     registerEmoteConfig();
     registerModelConfig();
@@ -7972,6 +8021,7 @@
     unregisterTextDisplayActions();
     uninstallTextDisplayIO();
     unregisterTextDisplayType();
+    destroyAnimorphMenu();
     unregisterLayerActions();
     unregisterTextureLayerActions();
     unregisterEmoteConfig();

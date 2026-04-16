@@ -1,4 +1,31 @@
 {
+  "1.1.2-beta": {
+    "title": "1.1.2-beta",
+    "author": "feeldev",
+    "date": "2026-04-16",
+    "categories": [
+      {
+        "title": "New Features",
+        "list": [
+          "Animorph menu — new top-level menu in Blockbench's menu bar for plugin options",
+          "Include Layer Bones in Main Animation — toggle (default: on) to control whether layer bones appear in the main animation export alongside the layer's own file"
+        ]
+      },
+      {
+        "title": "Bug Fixes",
+        "list": [
+          "Fixed animation import crash caused by GeckoLib keyframes using pre/post with {vector:[...]} objects — animations with catmullrom interpolation now import correctly",
+          "Fixed crash in layer/texture-layer panels when Collection.all was not yet initialized"
+        ]
+      },
+      {
+        "title": "Removed",
+        "list": [
+          "Reload Model button removed from the mode selector bar"
+        ]
+      }
+    ]
+  },
   "1.1.1-beta": {
     "title": "1.1.1-beta",
     "author": "feeldev",
